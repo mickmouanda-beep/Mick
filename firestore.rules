@@ -1,0 +1,161 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 1. Global Default-Deny Catch-All
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 2. Global Helper Functions
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128;
+    }
+
+    // 3. Platform Root Collections
+    match /creation_authorizations/{authId} {
+      allow get, write: if isValidId(authId);
+      allow list: if true;
+    }
+
+    match /commercial_formulas/{formulaId} {
+      allow get, write: if isValidId(formulaId);
+      allow list: if true;
+    }
+
+    match /subscriptions/{subscriptionId} {
+      allow get, write: if isValidId(subscriptionId);
+      allow list: if true;
+    }
+
+    match /license_renewals/{renewalId} {
+      allow get, write: if isValidId(renewalId);
+      allow list: if true;
+    }
+
+    match /pedagogical_references/{refId} {
+      allow get, write: if isValidId(refId);
+      allow list: if true;
+    }
+
+    match /users/{userId} {
+      allow get, write: if isValidId(userId);
+      allow list: if true;
+    }
+
+    // 4. Establishments and Tenant Subcollections
+    match /establishments/{establishmentId} {
+      allow get, write: if isValidId(establishmentId);
+      allow list: if true;
+
+      match /users/{userId} {
+        allow get, write: if isValidId(userId);
+        allow list: if true;
+      }
+
+      match /students/{studentId} {
+        allow get, write: if isValidId(studentId);
+        allow list: if true;
+      }
+
+      match /classes/{classId} {
+        allow get, write: if isValidId(classId);
+        allow list: if true;
+      }
+
+      match /subjects/{subjectId} {
+        allow get, write: if isValidId(subjectId);
+        allow list: if true;
+      }
+
+      match /class_subjects/{id} {
+        allow get, write: if isValidId(id);
+        allow list: if true;
+      }
+
+      match /teacher_schedules/{id} {
+        allow get, write: if isValidId(id);
+        allow list: if true;
+      }
+
+      match /fee_structures/{id} {
+        allow get, write: if isValidId(id);
+        allow list: if true;
+      }
+
+      match /school_tariff_plans/{id} {
+        allow get, write: if isValidId(id);
+        allow list: if true;
+      }
+
+      match /payments/{paymentId} {
+        allow get, write: if isValidId(paymentId);
+        allow list: if true;
+      }
+
+      match /expenses/{expenseId} {
+        allow get, write: if isValidId(expenseId);
+        allow list: if true;
+      }
+
+      match /evaluations/{evaluationId} {
+        allow get, write: if isValidId(evaluationId);
+        allow list: if true;
+      }
+
+      match /grades/{gradeId} {
+        allow get, write: if isValidId(gradeId);
+        allow list: if true;
+      }
+
+      match /student_attendances/{id} {
+        allow get, write: if isValidId(id);
+        allow list: if true;
+      }
+
+      match /teacher_attendances/{id} {
+        allow get, write: if isValidId(id);
+        allow list: if true;
+      }
+
+      match /disciplinary_incidents/{id} {
+        allow get, write: if isValidId(id);
+        allow list: if true;
+      }
+
+      match /payroll_records/{id} {
+        allow get, write: if isValidId(id);
+        allow list: if true;
+      }
+
+      match /lesson_logs/{id} {
+        allow get, write: if isValidId(id);
+        allow list: if true;
+      }
+
+      match /school_announcements/{id} {
+        allow get, write: if isValidId(id);
+        allow list: if true;
+      }
+
+      match /parent_students/{id} {
+        allow get, write: if isValidId(id);
+        allow list: if true;
+      }
+
+      match /staff_attendance_rules/{id} {
+        allow get, write: if isValidId(id);
+        allow list: if true;
+      }
+
+      match /staff_salary_parameters/{id} {
+        allow get, write: if isValidId(id);
+        allow list: if true;
+      }
+
+      match /audit_logs/{id} {
+        allow get, write: if isValidId(id);
+        allow list: if true;
+      }
+    }
+  }
+}

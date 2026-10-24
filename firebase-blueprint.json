@@ -1,0 +1,293 @@
+{
+  "entities": {
+    "establishment": {
+      "title": "Establishment",
+      "description": "Represents an educational institution or school.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "code": { "type": "string" },
+        "country": { "type": "string" },
+        "city": { "type": "string" },
+        "address": { "type": "string" },
+        "phone": { "type": "string" },
+        "email": { "type": "string" },
+        "motto": { "type": "string" },
+        "academic_year": { "type": "string" },
+        "currency": { "type": "string" },
+        "status": { "type": "string" },
+        "promoter_id": { "type": "string" },
+        "promoter_name": { "type": "string" },
+        "created_at": { "type": "string" }
+      },
+      "required": ["id", "name", "code", "academic_year"]
+    },
+    "user": {
+      "title": "User",
+      "description": "User profile with role, school link and authentication details.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "establishment_id": { "type": "string" },
+        "username": { "type": "string" },
+        "email": { "type": "string" },
+        "password_hash": { "type": "string" },
+        "full_name": { "type": "string" },
+        "phone": { "type": "string" },
+        "role": { "type": "string" },
+        "status": { "type": "string" },
+        "student_id": { "type": "string" },
+        "created_at": { "type": "string" }
+      },
+      "required": ["id", "establishment_id", "username", "full_name", "role"]
+    },
+    "student": {
+      "title": "Student",
+      "description": "Enrolled student record in an establishment.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "establishment_id": { "type": "string" },
+        "matricule": { "type": "string" },
+        "first_name": { "type": "string" },
+        "last_name": { "type": "string" },
+        "gender": { "type": "string" },
+        "birth_date": { "type": "string" },
+        "class_id": { "type": "string" },
+        "academic_year": { "type": "string" },
+        "guardian_name": { "type": "string" },
+        "guardian_phone": { "type": "string" },
+        "status": { "type": "string" },
+        "created_at": { "type": "string" }
+      },
+      "required": ["id", "establishment_id", "matricule", "first_name", "last_name"]
+    },
+    "class": {
+      "title": "Class",
+      "description": "School classroom or grade section.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "establishment_id": { "type": "string" },
+        "academic_year": { "type": "string" },
+        "name": { "type": "string" },
+        "cycle_code": { "type": "string" },
+        "level_code": { "type": "string" },
+        "serie_code": { "type": "string" },
+        "capacity": { "type": "number" },
+        "status": { "type": "string" },
+        "created_at": { "type": "string" }
+      },
+      "required": ["id", "establishment_id", "academic_year", "name", "cycle_code", "level_code"]
+    },
+    "subject": {
+      "title": "Subject",
+      "description": "Academic subject taught in the establishment.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "establishment_id": { "type": "string" },
+        "code": { "type": "string" },
+        "name": { "type": "string" },
+        "cycle_code": { "type": "string" },
+        "default_coefficient": { "type": "number" },
+        "created_at": { "type": "string" }
+      },
+      "required": ["id", "establishment_id", "code", "name", "cycle_code"]
+    },
+    "payment": {
+      "title": "Payment",
+      "description": "Financial receipt or fee transaction for a student.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "establishment_id": { "type": "string" },
+        "receipt_number": { "type": "string" },
+        "student_id": { "type": "string" },
+        "amount": { "type": "number" },
+        "payment_method": { "type": "string" },
+        "cashier_id": { "type": "string" },
+        "cashier_name": { "type": "string" },
+        "status": { "type": "string" },
+        "created_at": { "type": "string" }
+      },
+      "required": ["id", "establishment_id", "receipt_number", "student_id", "amount", "status"]
+    },
+    "evaluation": {
+      "title": "Evaluation",
+      "description": "Exam, assignment, or test record.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "establishment_id": { "type": "string" },
+        "class_id": { "type": "string" },
+        "subject_id": { "type": "string" },
+        "academic_year": { "type": "string" },
+        "term": { "type": "string" },
+        "eval_type": { "type": "string" },
+        "title": { "type": "string" },
+        "date": { "type": "string" },
+        "max_score": { "type": "number" },
+        "coefficient": { "type": "number" },
+        "created_by": { "type": "string" }
+      },
+      "required": ["id", "establishment_id", "class_id", "subject_id", "term", "eval_type", "title"]
+    },
+    "grade": {
+      "title": "Grade",
+      "description": "Student score obtained in an evaluation.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "establishment_id": { "type": "string" },
+        "evaluation_id": { "type": "string" },
+        "student_id": { "type": "string" },
+        "score": { "type": "number" },
+        "is_absent": { "type": "number" },
+        "remarks": { "type": "string" },
+        "updated_by": { "type": "string" }
+      },
+      "required": ["id", "establishment_id", "evaluation_id", "student_id"]
+    },
+    "payroll_record": {
+      "title": "PayrollRecord",
+      "description": "Staff salary and payroll disbursement record.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "establishment_id": { "type": "string" },
+        "user_id": { "type": "string" },
+        "employee_code": { "type": "string" },
+        "full_name": { "type": "string" },
+        "job_title": { "type": "string" },
+        "period": { "type": "string" },
+        "base_salary": { "type": "number" },
+        "net_amount": { "type": "number" },
+        "status": { "type": "string" },
+        "created_at": { "type": "string" }
+      },
+      "required": ["id", "establishment_id", "employee_code", "full_name", "period", "status"]
+    },
+    "lesson_log": {
+      "title": "LessonLog",
+      "description": "Cahier de texte pedagogical entry by a teacher.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "establishment_id": { "type": "string" },
+        "teacher_id": { "type": "string" },
+        "class_id": { "type": "string" },
+        "subject_id": { "type": "string" },
+        "date": { "type": "string" },
+        "title": { "type": "string" },
+        "summary_content": { "type": "string" },
+        "status": { "type": "string" },
+        "created_at": { "type": "string" }
+      },
+      "required": ["id", "establishment_id", "teacher_id", "class_id", "subject_id", "date", "title"]
+    },
+    "subscription": {
+      "title": "Subscription",
+      "description": "SaaS license and commercial subscription for an establishment.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "establishment_id": { "type": "string" },
+        "plan_name": { "type": "string" },
+        "status": { "type": "string" },
+        "max_students": { "type": "number" },
+        "max_users": { "type": "number" },
+        "expires_at": { "type": "string" }
+      },
+      "required": ["id", "establishment_id", "plan_name", "status", "expires_at"]
+    },
+    "creation_authorization": {
+      "title": "CreationAuthorization",
+      "description": "Developer activation license code to authorize new school registration.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "code": { "type": "string" },
+        "promoter_name": { "type": "string" },
+        "status": { "type": "string" },
+        "created_at": { "type": "string" }
+      },
+      "required": ["id", "code", "promoter_name", "status"]
+    },
+    "audit_log": {
+      "title": "AuditLog",
+      "description": "Security and activity audit log record.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "establishment_id": { "type": "string" },
+        "user_id": { "type": "string" },
+        "user_name": { "type": "string" },
+        "action": { "type": "string" },
+        "entity_type": { "type": "string" },
+        "entity_id": { "type": "string" },
+        "created_at": { "type": "string" }
+      },
+      "required": ["id", "establishment_id", "action", "entity_type"]
+    }
+  },
+  "firestore": {
+    "/establishments/{establishmentId}": {
+      "schema": "establishment",
+      "description": "Educational institutions registered on the platform."
+    },
+    "/establishments/{establishmentId}/users/{userId}": {
+      "schema": "user",
+      "description": "User accounts belonging to an establishment."
+    },
+    "/users/{userId}": {
+      "schema": "user",
+      "description": "Global user accounts index for rapid authentication."
+    },
+    "/establishments/{establishmentId}/students/{studentId}": {
+      "schema": "student",
+      "description": "Students enrolled in an establishment."
+    },
+    "/establishments/{establishmentId}/classes/{classId}": {
+      "schema": "class",
+      "description": "Classes belonging to an establishment."
+    },
+    "/establishments/{establishmentId}/subjects/{subjectId}": {
+      "schema": "subject",
+      "description": "Subjects taught in an establishment."
+    },
+    "/establishments/{establishmentId}/payments/{paymentId}": {
+      "schema": "payment",
+      "description": "Financial payment receipts for an establishment."
+    },
+    "/establishments/{establishmentId}/evaluations/{evaluationId}": {
+      "schema": "evaluation",
+      "description": "Examinations and evaluations for an establishment."
+    },
+    "/establishments/{establishmentId}/grades/{gradeId}": {
+      "schema": "grade",
+      "description": "Student grades recorded for an evaluation."
+    },
+    "/establishments/{establishmentId}/payroll_records/{payrollId}": {
+      "schema": "payroll_record",
+      "description": "Staff salary and payroll records for an establishment."
+    },
+    "/establishments/{establishmentId}/lesson_logs/{lessonLogId}": {
+      "schema": "lesson_log",
+      "description": "Cahier de texte lesson logs for an establishment."
+    },
+    "/establishments/{establishmentId}/audit_logs/{auditId}": {
+      "schema": "audit_log",
+      "description": "Security audit records for an establishment."
+    },
+    "/subscriptions/{subscriptionId}": {
+      "schema": "subscription",
+      "description": "Commercial subscriptions and school licenses."
+    },
+    "/creation_authorizations/{authId}": {
+      "schema": "creation_authorization",
+      "description": "Developer activation codes for new establishment creation."
+    }
+  }
+}
