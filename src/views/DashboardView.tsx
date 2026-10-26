@@ -360,6 +360,18 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
                 Arbitrer les requêtes →
               </button>
             </div>
+            <div className="bg-slate-900 border border-slate-800 p-4 rounded-2xl col-span-2 lg:col-span-4 flex items-center justify-between">
+              <div>
+                <span className="text-xs text-cyan-400 font-bold block uppercase tracking-wider">Emploi du Temps des Cours</span>
+                <p className="text-xs text-slate-300 mt-0.5">Consultez, modifiez, validez les conflits d’horaires et publiez les emplois du temps de l'établissement.</p>
+              </div>
+              <button
+                onClick={() => onNavigate('schedules')}
+                className="px-3.5 py-1.5 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-bold transition shrink-0 ml-4"
+              >
+                Gérer les emplois du temps →
+              </button>
+            </div>
           </div>
 
           {/* Tableau Détaillé des Effectifs par Classe (Exigé Section A DG) */}
@@ -447,6 +459,18 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
               <p className="text-2xl font-black text-purple-400 mt-1">Bulletins</p>
               <button onClick={() => onNavigate('grades')} className="text-[11px] text-purple-400 hover:underline mt-1">
                 Verrouillage & moyennes →
+              </button>
+            </div>
+            <div className="bg-slate-900 border border-slate-800 p-4 rounded-2xl col-span-2 lg:col-span-4 flex items-center justify-between">
+              <div>
+                <span className="text-xs text-blue-400 font-bold block uppercase tracking-wider">Organisation Pédagogique — Emploi du Temps</span>
+                <p className="text-xs text-slate-300 mt-0.5">Programmation hebdomadaire des cours par cycle, répartition des salles et contrôle des conflits d'horaires.</p>
+              </div>
+              <button
+                onClick={() => onNavigate('schedules')}
+                className="px-3.5 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold transition shrink-0 ml-4"
+              >
+                Gérer les emplois du temps →
               </button>
             </div>
           </div>

@@ -19,6 +19,7 @@ import { CommercialView } from './views/CommercialView.tsx';
 import { StudentView } from './views/StudentView.tsx';
 import { ParentView } from './views/ParentView.tsx';
 import { DeveloperView } from './views/DeveloperView.tsx';
+import { TimetableView } from './views/TimetableView.tsx';
 import { GraduationCap } from 'lucide-react';
 
 const MainApp: React.FC = () => {
@@ -93,6 +94,7 @@ const MainApp: React.FC = () => {
           {currentTab === 'students' && <StudentsView />}
           {currentTab === 'lessons' && <LessonsView />}
           {currentTab === 'teachers' && <TeachersView />}
+          {currentTab === 'schedules' && <TimetableView />}
           {currentTab === 'grades' && <GradesView />}
           {currentTab === 'attendance' && <AttendanceView />}
           {currentTab === 'finance' && <FinanceView />}

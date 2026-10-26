@@ -11,19 +11,32 @@ import {
   query,
   where
 } from 'firebase/firestore';
-import firebaseConfig from '../../firebase-applet-config.json';
+import fs from 'fs';
+import path from 'path';
+
+let firebaseConfig: any = {};
+try {
+  const configPath = path.resolve(process.cwd(), 'firebase-applet-config.json');
+  if (fs.existsSync(configPath)) {
+    firebaseConfig = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+  }
+} catch (e) {
+  console.error('Erreur lecture firebase-applet-config.json:', e);
+}
 
 const app = initializeApp(firebaseConfig);
 export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 
-export enum OperationType {
-  CREATE = 'create',
-  UPDATE = 'update',
-  DELETE = 'delete',
-  LIST = 'list',
-  GET = 'get',
-  WRITE = 'write',
-}
+export const OperationType = {
+  CREATE: 'create',
+  UPDATE: 'update',
+  DELETE: 'delete',
+  LIST: 'list',
+  GET: 'get',
+  WRITE: 'write',
+} as const;
+
+export type OperationType = (typeof OperationType)[keyof typeof OperationType];
 
 interface FirestoreErrorInfo {
   error: string;

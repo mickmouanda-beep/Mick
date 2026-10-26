@@ -1,6 +1,8 @@
-import initSqlJs, { Database } from 'sql.js';
+import initSqlJs from 'sql.js';
+type Database = any;
 import fs from 'fs';
 import path from 'path';
+import { hydrateSqliteFromFirestore } from './firestore_hydration.ts';
 
 const DB_DIR = path.resolve(process.cwd(), 'data');
 const DB_FILE = path.join(DB_DIR, 'faith_school.sqlite');
@@ -35,6 +37,15 @@ export async function getDb(): Promise<Database> {
   // Run schema migrations
   initSchema(dbInstance);
   saveDb();
+
+  // Hydrater SQLite depuis Cloud Firestore en arrière-plan sans bloquer le démarrage HTTP
+  hydrateSqliteFromFirestore(dbInstance)
+    .then(() => {
+      console.log('[getDb] Hydratation Firestore -> SQLite terminée.');
+    })
+    .catch((err) => {
+      console.error('[getDb] Avertissement hydratation SQLite depuis Firestore:', err);
+    });
 
   return dbInstance;
 }
@@ -563,6 +574,37 @@ function initSchema(db: Database): void {
     // Colonne déjà existante
   }
 
+  // Support des emplois du temps multi-établissements et métadonnées matières
+  try {
+    db.run('ALTER TABLE teacher_schedules ADD COLUMN establishment_id TEXT;');
+  } catch {}
+  try {
+    db.run('ALTER TABLE teacher_schedules ADD COLUMN is_published INTEGER NOT NULL DEFAULT 1;');
+  } catch {}
+  try {
+    db.run('ALTER TABLE teacher_schedules ADD COLUMN academic_year TEXT;');
+  } catch {}
+  try {
+    db.run('ALTER TABLE teacher_schedules ADD COLUMN updated_at TEXT;');
+  } catch {}
+  try {
+    db.run('ALTER TABLE subjects ADD COLUMN level_code TEXT;');
+  } catch {}
+  try {
+    db.run('ALTER TABLE subjects ADD COLUMN serie_code TEXT;');
+  } catch {}
+  try {
+    db.run('ALTER TABLE users ADD COLUMN first_name TEXT;');
+  } catch {}
+  try {
+    db.run('ALTER TABLE users ADD COLUMN last_name TEXT;');
+  } catch {}
+
+  try {
+    db.run('CREATE INDEX IF NOT EXISTS idx_teacher_schedules_class ON teacher_schedules(class_id);');
+    db.run('CREATE INDEX IF NOT EXISTS idx_teacher_schedules_teacher ON teacher_schedules(teacher_id);');
+  } catch {}
+
   // Incidents disciplinaires champs complets
   const incidentCols = [
     'action_taken TEXT',
@@ -606,6 +648,21 @@ function initSchema(db: Database): void {
   teacherAttCols.forEach((col) => {
     try {
       db.run(`ALTER TABLE teacher_attendances ADD COLUMN ${col};`);
+    } catch {
+      // Ignorer si déjà présent
+    }
+  });
+
+  // Quittances de paiement: réimpression et nom du payeur
+  const paymentCols = [
+    'payer_name TEXT',
+    'reprint_count INTEGER DEFAULT 0',
+    'last_reprinted_at TEXT',
+    "payment_type TEXT DEFAULT 'FRAIS_MENSUELS'"
+  ];
+  paymentCols.forEach((col) => {
+    try {
+      db.run(`ALTER TABLE payments ADD COLUMN ${col};`);
     } catch {
       // Ignorer si déjà présent
     }
@@ -837,9 +894,10 @@ function initSchema(db: Database): void {
   `);
 
   try {
-    db.run("ALTER TABLE school_tariff_plans ADD COLUMN created_at TEXT DEFAULT CURRENT_TIMESTAMP;");
+    db.run("ALTER TABLE school_tariff_plans ADD COLUMN created_at TEXT;");
+    db.run("UPDATE school_tariff_plans SET created_at = COALESCE(updated_at, datetime('now')) WHERE created_at IS NULL;");
   } catch (e) {
-    // Colonne probablement déjà existante
+    // Colonne déjà existante
   }
 
   db.run(`

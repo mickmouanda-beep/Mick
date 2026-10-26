@@ -35,7 +35,7 @@ export const StudentView: React.FC<StudentViewProps> = ({ studentIdOverride, rea
   const { user } = useAuth();
   const [data, setData] = useState<StudentPortalData | null>(null);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'grades' | 'attendance' | 'lessons' | 'finance' | 'announcements'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'schedule' | 'grades' | 'attendance' | 'lessons' | 'finance' | 'announcements'>('dashboard');
   const [selectedTerm, setSelectedTerm] = useState('TRIMESTRE_1');
   const [isJustifModalOpen, setIsJustifModalOpen] = useState(false);
   const [submittingJustif, setSubmittingJustif] = useState(false);
@@ -220,6 +220,7 @@ export const StudentView: React.FC<StudentViewProps> = ({ studentIdOverride, rea
       <div className="flex border-b border-slate-800 overflow-x-auto pb-px space-x-2">
         {[
           { id: 'dashboard', label: 'Vue Générale', icon: Layers },
+          { id: 'schedule', label: 'Emploi du Temps', icon: Calendar },
           { id: 'grades', label: 'Notes & Bulletins', icon: Award },
           { id: 'attendance', label: 'Assiduité & Discipline', icon: Clock },
           { id: 'lessons', label: 'Cahier de texte & Devoirs', icon: BookOpen },
@@ -408,6 +409,95 @@ export const StudentView: React.FC<StudentViewProps> = ({ studentIdOverride, rea
                 )}
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* ONGLET : EMPLOI DU TEMPS DE LA CLASSE */}
+      {activeTab === 'schedule' && (
+        <div className="space-y-6">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-800">
+              <div>
+                <h3 className="text-sm font-bold text-white flex items-center space-x-2">
+                  <Calendar className="w-4 h-4 text-cyan-400" />
+                  <span>Emploi du Temps Hebdomadaire • {student.class_name || 'Ma Classe'}</span>
+                </h3>
+                <p className="text-xs text-slate-400">
+                  Horaires officiels des cours dispensés du Lundi au Samedi
+                </p>
+              </div>
+
+              <button
+                onClick={() => window.print()}
+                className="px-3.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-xl text-xs font-semibold flex items-center space-x-1.5 transition self-start sm:self-auto"
+              >
+                <Printer className="w-3.5 h-3.5 text-slate-400" />
+                <span>Imprimer mon planning</span>
+              </button>
+            </div>
+
+            {(!schedules || schedules.length === 0) ? (
+              <div className="p-12 text-center text-slate-400 space-y-2 border border-dashed border-slate-800 rounded-xl">
+                <Calendar className="w-10 h-10 mx-auto text-slate-600" />
+                <p className="text-sm font-semibold text-slate-300">Aucun cours programmé pour l'instant</p>
+                <p className="text-xs text-slate-500">L'administration scolaire est en train de finaliser la grille horaire de votre classe.</p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-3">
+                {[
+                  { id: 1, label: 'Lundi' },
+                  { id: 2, label: 'Mardi' },
+                  { id: 3, label: 'Mercredi' },
+                  { id: 4, label: 'Jeudi' },
+                  { id: 5, label: 'Vendredi' },
+                  { id: 6, label: 'Samedi' },
+                ].map((day) => {
+                  const daySlots = schedules
+                    .filter((s: any) => s.day_of_week === day.id)
+                    .sort((a: any, b: any) => (a.start_time || '').localeCompare(b.start_time || ''));
+
+                  return (
+                    <div key={day.id} className="bg-slate-950/70 border border-slate-800 rounded-xl overflow-hidden flex flex-col">
+                      <div className="bg-slate-800/80 px-3 py-2 border-b border-slate-800 flex items-center justify-between">
+                        <span className="font-bold text-xs text-white">{day.label}</span>
+                        <span className="text-[10px] px-1.5 py-0.2 rounded bg-slate-900 text-slate-400">
+                          {daySlots.length}
+                        </span>
+                      </div>
+
+                      <div className="p-2 space-y-2 flex-1 min-h-[140px]">
+                        {daySlots.length === 0 ? (
+                          <div className="h-full flex items-center justify-center text-center p-3 text-[11px] text-slate-600 italic">
+                            Pas de cours
+                          </div>
+                        ) : (
+                          daySlots.map((slot: any) => (
+                            <div
+                              key={slot.id}
+                              className="p-2.5 bg-slate-900 border border-cyan-500/20 rounded-lg hover:border-cyan-500/50 transition"
+                            >
+                              <div className="text-[11px] font-mono text-cyan-300 font-bold mb-1">
+                                {slot.start_time} - {slot.end_time}
+                              </div>
+                              <div className="text-xs font-bold text-white truncate">
+                                {slot.subject_name}
+                              </div>
+                              <div className="text-[10px] text-indigo-300 font-semibold truncate mt-0.5">
+                                {slot.teacher_name || 'Enseignant titulaire'}
+                              </div>
+                              <div className="text-[9px] text-slate-400 mt-0.5">
+                                {slot.room ? `Salle ${slot.room}` : 'Salle principale'}
+                              </div>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         </div>
       )}

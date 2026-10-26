@@ -17,11 +17,23 @@ import {
   Download,
   Filter,
   Check,
+  Calendar,
+  Printer,
+  Clock,
 } from 'lucide-react';
 import { api } from '../lib/api.ts';
 import { useAuth } from '../context/AuthContext.tsx';
 import { SchoolClass, Subject, ClassSubject, User } from '../types.ts';
 import { OFFICIAL_CYCLES, OFFICIAL_LYCEE_SERIES, CONGO_SERIES_CATALOG, DetailedSerieRef, CONGO_COLLEGE_CATALOG, CollegeClassRef } from '../constants.ts';
+
+const DAYS_OF_WEEK = [
+  { id: 1, label: 'Lundi' },
+  { id: 2, label: 'Mardi' },
+  { id: 3, label: 'Mercredi' },
+  { id: 4, label: 'Jeudi' },
+  { id: 5, label: 'Vendredi' },
+  { id: 6, label: 'Samedi' },
+];
 
 export const AcademicView: React.FC = () => {
   const { establishment, hasRole } = useAuth();
@@ -29,10 +41,21 @@ export const AcademicView: React.FC = () => {
   const [subjects, setSubjects] = useState<Subject[]>([]);
   const [teachers, setTeachers] = useState<User[]>([]);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'classes' | 'subjects' | 'assignment' | 'referentiel'>('classes');
+  const [activeTab, setActiveTab] = useState<'classes' | 'subjects' | 'assignment' | 'referentiel' | 'schedules'>('classes');
   const [refSubTab, setRefSubTab] = useState<'lycee' | 'college'>('lycee');
   const [refCategoryFilter, setRefCategoryFilter] = useState<'ALL' | 'GENERAL' | 'TERTIAIRE' | 'INDUSTRIEL' | 'INFORMATIQUE'>('ALL');
   const [importingRef, setImportingRef] = useState<string | null>(null);
+
+  // Emplois du temps par classe (Collège & Lycée)
+  const [schedules, setSchedules] = useState<any[]>([]);
+  const [selectedScheduleClassId, setSelectedScheduleClassId] = useState<string>('');
+  const [showAddClassScheduleModal, setShowAddClassScheduleModal] = useState(false);
+  const [slotDay, setSlotDay] = useState<number>(1);
+  const [slotStart, setSlotStart] = useState<string>('08:00');
+  const [slotEnd, setSlotEnd] = useState<string>('10:00');
+  const [slotSubjectId, setSlotSubjectId] = useState<string>('');
+  const [slotTeacherId, setSlotTeacherId] = useState<string>('');
+  const [slotRoom, setSlotRoom] = useState<string>('');
 
   // Modal Création Classe
   const [showClassModal, setShowClassModal] = useState(false);
@@ -67,22 +90,63 @@ export const AcademicView: React.FC = () => {
   const loadData = async () => {
     setLoading(true);
     try {
-      const [clsData, subjData, teachData] = await Promise.all([
+      const [clsData, subjData, teachData, schedData] = await Promise.all([
         api.getClasses(),
         api.getSubjects(),
         api.getTeachers(),
+        api.getSchedules(),
       ]);
       setClasses(clsData);
       setSubjects(subjData);
       setTeachers(teachData);
+      setSchedules(schedData);
 
-      if (clsData.length > 0 && !selectedClassForSubjects) {
-        setSelectedClassForSubjects(clsData[0].id);
+      if (clsData.length > 0) {
+        if (!selectedClassForSubjects) setSelectedClassForSubjects(clsData[0].id);
+        if (!selectedScheduleClassId) setSelectedScheduleClassId(clsData[0].id);
       }
     } catch (err: any) {
       setError(err.message || 'Erreur lors du chargement des données académiques.');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleAddClassScheduleSlot = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedScheduleClassId || !slotSubjectId || !slotTeacherId) {
+      setError('Veuillez sélectionner la matière et le professeur.');
+      return;
+    }
+    setError(null);
+    try {
+      await api.createSchedule({
+        classId: selectedScheduleClassId,
+        teacherId: slotTeacherId,
+        subjectId: slotSubjectId,
+        dayOfWeek: Number(slotDay),
+        startTime: slotStart,
+        endTime: slotEnd,
+        room: slotRoom.trim() || undefined,
+      });
+      setSuccess('Créneau ajouté à l’emploi du temps avec succès.');
+      setShowAddClassScheduleModal(false);
+      const updated = await api.getSchedules();
+      setSchedules(updated);
+    } catch (err: any) {
+      setError(err.message || 'Erreur lors de l’ajout du créneau.');
+    }
+  };
+
+  const handleDeleteClassScheduleSlot = async (slotId: string) => {
+    if (!confirm('Supprimer ce cours de l’emploi du temps ?')) return;
+    try {
+      await api.deleteSchedule(slotId);
+      setSuccess('Créneau supprimé.');
+      const updated = await api.getSchedules();
+      setSchedules(updated);
+    } catch (err: any) {
+      setError(err.message || 'Erreur lors de la suppression.');
     }
   };
 
@@ -303,6 +367,18 @@ export const AcademicView: React.FC = () => {
         >
           <ShieldCheck className="w-4 h-4 text-emerald-400" />
           <span>Référentiel National (Congo-Brazzaville)</span>
+        </button>
+
+        <button
+          onClick={() => setActiveTab('schedules')}
+          className={`px-4 py-2.5 border-b-2 transition flex items-center space-x-2 shrink-0 ${
+            activeTab === 'schedules'
+              ? 'border-cyan-500 text-cyan-400 font-bold'
+              : 'border-transparent text-slate-400 hover:text-slate-200'
+          }`}
+        >
+          <Calendar className="w-4 h-4 text-cyan-400" />
+          <span>Emplois du Temps par Classe ({schedules.length})</span>
         </button>
       </div>
 
@@ -839,6 +915,264 @@ export const AcademicView: React.FC = () => {
                 </div>
               ))
             )}
+          </div>
+        </div>
+      )}
+
+      {/* TAB 5: EMPLOIS DU TEMPS PAR CLASSE (COLLÈGE & LYCÉE) */}
+      {activeTab === 'schedules' && (
+        <div className="space-y-4">
+          <div className="bg-slate-900 border border-slate-800 p-4 rounded-2xl flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
+            <div className="flex items-center space-x-3">
+              <Calendar className="w-5 h-5 text-cyan-400 shrink-0" />
+              <div>
+                <label className="text-[11px] text-slate-400 block font-medium">Sélectionner la Classe :</label>
+                <select
+                  value={selectedScheduleClassId}
+                  onChange={(e) => setSelectedScheduleClassId(e.target.value)}
+                  className="bg-slate-950 border border-slate-800 text-white text-xs rounded-lg px-3 py-1.5 font-bold focus:outline-none focus:border-cyan-500 cursor-pointer"
+                >
+                  {classes.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name} ({c.level_code} {c.serie_code ? `- Série ${c.serie_code}` : ''} • {c.cycle_code})
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            <div className="flex items-center space-x-2">
+              <button
+                onClick={() => window.print()}
+                className="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-xl text-xs font-semibold flex items-center space-x-1.5 transition"
+              >
+                <Printer className="w-3.5 h-3.5 text-slate-400" />
+                <span>Imprimer l'Emploi du Temps</span>
+              </button>
+
+              {canManage && selectedScheduleClassId && (
+                <button
+                  onClick={() => {
+                    setSlotSubjectId(subjects[0]?.id || '');
+                    setSlotTeacherId(teachers[0]?.id || '');
+                    setShowAddClassScheduleModal(true);
+                  }}
+                  className="px-3.5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-semibold flex items-center space-x-1.5 transition shadow"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>Ajouter un Cours</span>
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Grille de l'Emploi du Temps de la classe */}
+          {(() => {
+            const currentClass = classes.find((c) => c.id === selectedScheduleClassId);
+            const classSlots = schedules.filter((s) => s.class_id === selectedScheduleClassId);
+
+            return (
+              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-6 shadow-sm">
+                <div className="mb-4 pb-3 border-b border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                  <div>
+                    <h3 className="text-sm font-bold text-white flex items-center space-x-2">
+                      <span>Emploi du Temps Officiel : {currentClass?.name || 'Sélectionnez une classe'}</span>
+                    </h3>
+                    <p className="text-[11px] text-slate-400">
+                      Niveau : {currentClass?.level_code} {currentClass?.serie_code ? `• Série ${currentClass.serie_code}` : ''} • Cycle : {currentClass?.cycle_code} • Salle : {currentClass?.room || 'Non assignée'}
+                    </p>
+                  </div>
+                  <div className="text-right">
+                    <span className="text-xs font-bold text-cyan-400">{classSlots.length}</span>
+                    <span className="text-[11px] text-slate-500 ml-1">cours programmés cette semaine</span>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-3">
+                  {DAYS_OF_WEEK.map((day) => {
+                    const daySlots = classSlots
+                      .filter((s) => s.day_of_week === day.id)
+                      .sort((a, b) => a.start_time.localeCompare(b.start_time));
+
+                    return (
+                      <div key={day.id} className="bg-slate-950/70 border border-slate-800 rounded-xl overflow-hidden flex flex-col">
+                        <div className="bg-slate-800/80 px-3 py-2 border-b border-slate-800 flex items-center justify-between">
+                          <span className="font-bold text-xs text-white">{day.label}</span>
+                          <span className="text-[10px] px-1.5 py-0.2 rounded bg-slate-900 text-slate-400">
+                            {daySlots.length}
+                          </span>
+                        </div>
+
+                        <div className="p-2 space-y-2 flex-1 min-h-[140px]">
+                          {daySlots.length === 0 ? (
+                            <div className="h-full flex items-center justify-center text-center p-3 text-[11px] text-slate-600 italic">
+                              Aucun cours
+                            </div>
+                          ) : (
+                            daySlots.map((slot) => (
+                              <div
+                                key={slot.id}
+                                className="p-2.5 bg-slate-900 border border-cyan-500/20 rounded-lg hover:border-cyan-500/50 transition group relative"
+                              >
+                                <div className="flex items-center justify-between text-[11px] font-mono text-cyan-300 font-bold mb-1">
+                                  <span>{slot.start_time} - {slot.end_time}</span>
+                                  {canManage && (
+                                    <button
+                                      onClick={() => handleDeleteClassScheduleSlot(slot.id)}
+                                      title="Supprimer ce cours"
+                                      className="text-slate-500 hover:text-rose-400 opacity-0 group-hover:opacity-100 transition"
+                                    >
+                                      <Trash2 className="w-3 h-3" />
+                                    </button>
+                                  )}
+                                </div>
+                                <div className="text-xs font-bold text-white truncate">
+                                  {slot.subject_name}
+                                </div>
+                                <div className="text-[10px] text-indigo-300 font-semibold truncate mt-0.5">
+                                  {slot.teacher_name || 'Prof. non assigné'}
+                                </div>
+                                <div className="text-[9px] text-slate-400 mt-0.5">
+                                  {slot.room ? `Salle ${slot.room}` : 'Salle de classe'}
+                                </div>
+                              </div>
+                            ))
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })()}
+        </div>
+      )}
+
+      {/* MODAL AJOUT CRÉNEAU CLASSE */}
+      {showAddClassScheduleModal && (
+        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-xs flex items-center justify-center p-4 z-50">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-md p-6 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+              <div>
+                <h2 className="text-base font-bold text-white flex items-center space-x-2">
+                  <Calendar className="w-5 h-5 text-indigo-400" />
+                  <span>Programmer un Cours</span>
+                </h2>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Classe : <strong className="text-white">{classes.find(c => c.id === selectedScheduleClassId)?.name}</strong>
+                </p>
+              </div>
+              <button onClick={() => setShowAddClassScheduleModal(false)} className="text-slate-400 hover:text-white">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleAddClassScheduleSlot} className="space-y-3.5 text-xs">
+              <div>
+                <label className="block text-slate-300 mb-1 font-semibold">Matière *</label>
+                <select
+                  required
+                  value={slotSubjectId}
+                  onChange={(e) => setSlotSubjectId(e.target.value)}
+                  className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white"
+                >
+                  <option value="">Sélectionner une matière...</option>
+                  {subjects.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.name} ({s.code})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-slate-300 mb-1 font-semibold">Enseignant / Professeur *</label>
+                <select
+                  required
+                  value={slotTeacherId}
+                  onChange={(e) => setSlotTeacherId(e.target.value)}
+                  className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white"
+                >
+                  <option value="">Sélectionner un enseignant...</option>
+                  {teachers.map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.full_name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-slate-300 mb-1 font-semibold">Jour de la semaine *</label>
+                <select
+                  required
+                  value={slotDay}
+                  onChange={(e) => setSlotDay(Number(e.target.value))}
+                  className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white"
+                >
+                  {DAYS_OF_WEEK.map((d) => (
+                    <option key={d.id} value={d.id}>
+                      {d.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-slate-300 mb-1 font-semibold">Heure Début *</label>
+                  <input
+                    type="time"
+                    required
+                    value={slotStart}
+                    onChange={(e) => setSlotStart(e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-300 mb-1 font-semibold">Heure Fin *</label>
+                  <input
+                    type="time"
+                    required
+                    value={slotEnd}
+                    onChange={(e) => setSlotEnd(e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white font-mono"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-slate-300 mb-1">Salle spécifique (optionnel)</label>
+                <input
+                  type="text"
+                  placeholder="Ex: Salle 14, Labo Informatique..."
+                  value={slotRoom}
+                  onChange={(e) => setSlotRoom(e.target.value)}
+                  className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white"
+                />
+              </div>
+
+              <div className="p-2.5 bg-slate-950 border border-slate-800 rounded-lg text-[11px] text-slate-400">
+                <span className="font-semibold text-cyan-400">Détection de collision :</span> Le système vérifie en temps réel que ni le professeur ni la classe ne sont déjà en cours sur ce créneau horaire.
+              </div>
+
+              <div className="flex justify-end space-x-2 pt-4 border-t border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setShowAddClassScheduleModal(false)}
+                  className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl font-semibold"
+                >
+                  Annuler
+                </button>
+                <button
+                  type="submit"
+                  className="px-5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl font-semibold shadow-md"
+                >
+                  Valider le Cours
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

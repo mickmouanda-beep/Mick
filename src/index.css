@@ -16,6 +16,27 @@
     color: black !important;
   }
 
+  .fixed.inset-0 {
+    position: static !important;
+    background: transparent !important;
+    backdrop-filter: none !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    overflow: visible !important;
+    box-shadow: none !important;
+  }
+
+  .fixed.inset-0 > div {
+    background: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    max-width: 100% !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    max-height: none !important;
+    overflow: visible !important;
+  }
+
   .printable-document {
     box-shadow: none !important;
     border: none !important;
@@ -23,5 +44,7 @@
     padding: 0 !important;
     max-width: 100% !important;
     width: 100% !important;
+    background: white !important;
+    color: black !important;
   }
 }

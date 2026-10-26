@@ -55,6 +55,7 @@ export function generateToken(user: AuthUser): string {
       email: user.email,
       full_name: user.full_name,
       role: user.role,
+      student_id: user.student_id || null,
     },
     JWT_SECRET,
     { expiresIn: TOKEN_EXPIRY }

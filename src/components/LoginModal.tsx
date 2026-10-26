@@ -497,12 +497,22 @@ export const LoginModal: React.FC<LoginModalProps> = ({ onSuccess }) => {
                     type="text"
                     required
                     autoFocus
-                    placeholder="Identifiant ou adresse e-mail"
+                    placeholder="Identifiant, matricule ou téléphone"
                     value={username}
                     onChange={(e) => setUsername(e.target.value)}
                     className="w-full bg-transparent text-sm text-slate-900 placeholder-slate-400 font-medium focus:outline-none"
                   />
                 </div>
+              </div>
+
+              {/* Guide de connexion rapide multi-profils */}
+              <div className="px-1 text-[11px] text-slate-500 flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                <span className="font-semibold text-slate-700">Guide :</span>
+                <span className="text-blue-700 font-medium">Personnel / Professeurs</span>
+                <span>•</span>
+                <span className="text-indigo-700 font-medium">Élèves (Matricule)</span>
+                <span>•</span>
+                <span className="text-emerald-700 font-medium">Parents (Téléphone)</span>
               </div>
 
               {/* Champ 2 : Mot de passe avec œil afficher/masquer */}

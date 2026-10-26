@@ -24,9 +24,11 @@ import {
 } from 'lucide-react';
 import { api } from '../lib/api.ts';
 import { useAuth } from '../context/AuthContext.tsx';
-import { Student, SchoolClass } from '../types.ts';
+import { Student, SchoolClass, Payment } from '../types.ts';
 import { StudentPhotoCapture } from '../components/StudentPhotoCapture.tsx';
 import { sortStudents } from '../lib/sortingUtils.ts';
+import { PaymentReceiptModal } from '../components/PaymentReceiptModal.tsx';
+import { StudentStatementModal } from '../components/StudentStatementModal.tsx';
 
 export const StudentsView: React.FC = () => {
   const { establishment, hasRole, user } = useAuth();
@@ -43,6 +45,10 @@ export const StudentsView: React.FC = () => {
   const [showAddModal, setShowAddModal] = useState(false);
   const [selectedStudent, setSelectedStudent] = useState<any | null>(null);
   const [showDetailModal, setShowDetailModal] = useState(false);
+  const [detailTab, setDetailTab] = useState<'fiche' | 'payments'>('fiche');
+  const [receiptsToPrint, setReceiptsToPrint] = useState<Payment[] | null>(null);
+  const [showStatementModal, setShowStatementModal] = useState(false);
+  const [selectedStudentPaymentIds, setSelectedStudentPaymentIds] = useState<string[]>([]);
   const [showTransferModal, setShowTransferModal] = useState(false);
   const [transferReason, setTransferReason] = useState('');
   const [destinationSchool, setDestinationSchool] = useState('');
@@ -741,221 +747,413 @@ export const StudentsView: React.FC = () => {
                     <span>{selectedStudent.student.photo_data ? 'Changer Photo' : 'Ajouter Photo'}</span>
                   </button>
                 )}
-                <button
-                  onClick={() => setShowDetailModal(false)}
-                  className="text-slate-400 hover:text-white p-1"
-                >
-                  <X className="w-5 h-5" />
-                </button>
               </div>
             </div>
 
-            {/* DOCUMENT OFFICIEL IMPRIMABLE - FICHE D'INSCRIPTION SCOLAIRE */}
-            <div className="printable-document bg-white text-slate-900 rounded-xl p-6 sm:p-8 mt-4 border border-slate-200 shadow-md">
-              
-              {/* En-tête officiel République du Congo */}
-              <div className="flex items-start justify-between border-b-2 border-slate-900 pb-4 mb-4">
-                <div className="space-y-1 text-left max-w-sm">
-                  <p className="text-[10px] font-black uppercase tracking-widest text-slate-700">
-                    RÉPUBLIQUE DU CONGO
-                  </p>
-                  <p className="text-[9px] uppercase text-slate-500 font-semibold tracking-wider">
-                    Unité • Travail • Progrès
-                  </p>
-                  <p className="text-[9px] text-slate-600 uppercase font-semibold pt-1">
-                    MINISTÈRE DE L'ENSEIGNEMENT PRIMAIRE, SECONDAIRE ET DE L'ALPHABÉTISATION
-                  </p>
-                  <h3 className="text-sm font-extrabold uppercase text-indigo-900 pt-1">
-                    {establishment?.name || 'ÉTABLISSEMENT SCOLAIRE'}
-                  </h3>
-                  <p className="text-[10px] text-slate-600">
-                    {establishment?.address ? `${establishment.address}, ` : ''}{establishment?.city || 'Brazzaville'} • Tél : {establishment?.phone || '+242 06 000 0000'}
-                  </p>
-                </div>
-
-                {/* Cadre Photo d'identité officielle */}
-                <div className="flex flex-col items-center">
-                  <div className="w-28 h-36 border-2 border-slate-800 rounded bg-slate-50 overflow-hidden flex flex-col items-center justify-center p-0.5 shadow-sm">
-                    {selectedStudent.student.photo_data ? (
-                      <img
-                        src={selectedStudent.student.photo_data}
-                        alt="Photo d'identité officielle"
-                        className="w-full h-full object-cover"
-                      />
-                    ) : (
-                      <div className="text-center p-2 text-slate-400">
-                        <Camera className="w-8 h-8 mx-auto mb-1 opacity-40" />
-                        <span className="text-[8px] uppercase font-bold text-slate-500 block leading-tight">
-                          PHOTO D'IDENTITÉ OFFICIELLE 3.5×4.5
-                        </span>
-                      </div>
-                    )}
-                  </div>
-                  <span className="text-[9px] text-slate-500 font-mono mt-1 font-semibold">
-                    {selectedStudent.student.matricule}
-                  </span>
-                </div>
-              </div>
-
-              {/* Titre du document */}
-              <div className="text-center my-4 py-2 bg-indigo-50 border-y border-indigo-200">
-                <h2 className="text-base sm:text-lg font-black uppercase tracking-wider text-indigo-950">
-                  FICHE INDIVIDUELLE D'INSCRIPTION SCOLAIRE
-                </h2>
-                <p className="text-xs font-semibold text-indigo-800">
-                  Année Scolaire {selectedStudent.student.academic_year || establishment?.academic_year || '2026-2027'}
-                </p>
-              </div>
-
-              {/* Tableau d'identification de l'élève */}
-              <div className="space-y-4 text-xs">
-                
-                {/* 1. État Civil */}
-                <div>
-                  <h4 className="text-[11px] font-black uppercase tracking-wider text-slate-800 border-b border-slate-300 pb-1 mb-2">
-                    1. Identité Civile de l'Élève
-                  </h4>
-                  <table className="w-full border-collapse">
-                    <tbody>
-                      <tr className="border-b border-slate-200">
-                        <td className="py-1.5 font-bold text-slate-700 w-1/3">Nom de famille (Patronyme) :</td>
-                        <td className="py-1.5 font-black text-slate-900 text-sm uppercase">
-                          {selectedStudent.student.last_name}
-                        </td>
-                      </tr>
-                      <tr className="border-b border-slate-200">
-                        <td className="py-1.5 font-bold text-slate-700">Prénom(s) déclarés :</td>
-                        <td className="py-1.5 font-semibold text-slate-900">
-                          {selectedStudent.student.first_name}
-                        </td>
-                      </tr>
-                      {selectedStudent.student.post_name && (
-                        <tr className="border-b border-slate-200">
-                          <td className="py-1.5 font-bold text-slate-700">Post-nom / Deuxième nom :</td>
-                          <td className="py-1.5 text-slate-900">{selectedStudent.student.post_name}</td>
-                        </tr>
-                      )}
-                      <tr className="border-b border-slate-200">
-                        <td className="py-1.5 font-bold text-slate-700">Sexe :</td>
-                        <td className="py-1.5 text-slate-900 font-semibold">
-                          {selectedStudent.student.gender === 'M' ? 'Masculin (M)' : 'Féminin (F)'}
-                        </td>
-                      </tr>
-                      <tr className="border-b border-slate-200">
-                        <td className="py-1.5 font-bold text-slate-700">Date et lieu de naissance :</td>
-                        <td className="py-1.5 text-slate-900">
-                          {selectedStudent.student.birth_date} à {selectedStudent.student.birth_place || 'Brazzaville'}
-                        </td>
-                      </tr>
-                      <tr className="border-b border-slate-200">
-                        <td className="py-1.5 font-bold text-slate-700">Adresse de résidence :</td>
-                        <td className="py-1.5 text-slate-900">{selectedStudent.student.address || 'Non spécifiée'}</td>
-                      </tr>
-                    </tbody>
-                  </table>
-                </div>
-
-                {/* 2. Scolarité */}
-                <div>
-                  <h4 className="text-[11px] font-black uppercase tracking-wider text-slate-800 border-b border-slate-300 pb-1 mb-2">
-                    2. Affectation Scolaire & Classe
-                  </h4>
-                  <div className="grid grid-cols-2 gap-4 bg-slate-50 p-3 rounded-lg border border-slate-200">
-                    <div>
-                      <span className="text-[10px] text-slate-500 uppercase font-semibold">Classe affectée</span>
-                      <p className="font-extrabold text-indigo-900 text-sm mt-0.5">
-                        {selectedStudent.student.class_name || 'En attente d’affectation'}
-                      </p>
-                    </div>
-                    <div>
-                      <span className="text-[10px] text-slate-500 uppercase font-semibold">Niveau / Cycle</span>
-                      <p className="font-bold text-slate-800 mt-0.5">
-                        {selectedStudent.student.level_code || '—'} ({selectedStudent.student.cycle_code || 'Général'})
-                      </p>
-                    </div>
-                  </div>
-                </div>
-
-                {/* 3. Responsable Légal */}
-                <div>
-                  <h4 className="text-[11px] font-black uppercase tracking-wider text-slate-800 border-b border-slate-300 pb-1 mb-2">
-                    3. Responsable Légal & Contact d'Urgence
-                  </h4>
-                  <table className="w-full border-collapse">
-                    <tbody>
-                      <tr className="border-b border-slate-200">
-                        <td className="py-1.5 font-bold text-slate-700 w-1/3">Nom du Parent / Tuteur :</td>
-                        <td className="py-1.5 font-bold text-slate-900">
-                          {selectedStudent.student.guardian_name} ({selectedStudent.student.guardian_relation})
-                        </td>
-                      </tr>
-                      <tr className="border-b border-slate-200">
-                        <td className="py-1.5 font-bold text-slate-700">Téléphone de contact :</td>
-                        <td className="py-1.5 font-mono font-bold text-slate-900">
-                          {selectedStudent.student.guardian_phone}
-                        </td>
-                      </tr>
-                      {selectedStudent.student.guardian_email && (
-                        <tr className="border-b border-slate-200">
-                          <td className="py-1.5 font-bold text-slate-700">Adresse Email :</td>
-                          <td className="py-1.5 text-slate-900">{selectedStudent.student.guardian_email}</td>
-                        </tr>
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-
-                {/* Bloc Signatures et Cachet */}
-                <div className="pt-6 border-t border-slate-300 grid grid-cols-2 gap-8 text-center">
-                  <div className="space-y-12">
-                    <p className="text-[11px] font-bold text-slate-700 uppercase">
-                      Le Responsable Légal<br />(Signature précédée de la mention "Lu et approuvé")
-                    </p>
-                    <div className="h-10 border-b border-dashed border-slate-400 mx-6" />
-                  </div>
-                  <div className="space-y-12">
-                    <p className="text-[11px] font-bold text-slate-700 uppercase">
-                      La Direction de l'Établissement<br />(Cachet officiel & Signature)
-                    </p>
-                    <div className="h-10 border-b border-dashed border-slate-400 mx-6" />
-                  </div>
-                </div>
-
-              </div>
-
-            </div>
-
-            {/* Actions du dossier */}
-            <div className="flex flex-wrap items-center justify-between gap-2 pt-4 border-t border-slate-800 no-print">
-              <div className="flex items-center space-x-2">
-                {canEdit && (
-                  <>
-                    <button
-                      onClick={() => setShowTransferModal(true)}
-                      className="px-3 py-1.5 bg-amber-600/20 hover:bg-amber-600/30 text-amber-300 border border-amber-600/30 rounded-lg text-xs font-semibold flex items-center space-x-1"
-                    >
-                      <ArrowRightLeft className="w-3.5 h-3.5" />
-                      <span>Transférer</span>
-                    </button>
-                    <button
-                      onClick={() => handleArchive(selectedStudent.student.id, `${selectedStudent.student.last_name} ${selectedStudent.student.first_name}`)}
-                      className="px-3 py-1.5 bg-rose-600/20 hover:bg-rose-600/30 text-rose-300 border border-rose-600/30 rounded-lg text-xs font-semibold flex items-center space-x-1"
-                    >
-                      <Archive className="w-3.5 h-3.5" />
-                      <span>Archiver Dossier</span>
-                    </button>
-                  </>
-                )}
-              </div>
-
+            {/* ONGLET NAVIGATION DU DOSSIER ÉLÈVE */}
+            <div className="flex border-b border-slate-800 text-xs font-semibold mt-3 mb-3 no-print">
               <button
-                onClick={() => window.print()}
-                className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold flex items-center space-x-2 shadow-lg transition"
+                type="button"
+                onClick={() => setDetailTab('fiche')}
+                className={`px-4 py-2 border-b-2 transition flex items-center space-x-1.5 cursor-pointer ${
+                  detailTab === 'fiche'
+                    ? 'border-indigo-500 text-indigo-400 font-bold'
+                    : 'border-transparent text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <FileText className="w-4 h-4" />
+                <span>Fiche d'Inscription Officielle</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setDetailTab('payments')}
+                className={`px-4 py-2 border-b-2 transition flex items-center space-x-1.5 cursor-pointer ${
+                  detailTab === 'payments'
+                    ? 'border-indigo-500 text-indigo-400 font-bold'
+                    : 'border-transparent text-slate-400 hover:text-slate-200'
+                }`}
               >
                 <Printer className="w-4 h-4" />
-                <span>Imprimer la Fiche d'Inscription Officielle</span>
+                <span>Paiements & Quittances ({selectedStudent.payments?.length || 0})</span>
               </button>
             </div>
+
+            {/* VUE 1 : FICHE INDIVIDUELLE D'INSCRIPTION SCOLAIRE */}
+            {detailTab === 'fiche' && (
+              <>
+                <div className="printable-document bg-white text-slate-900 rounded-xl p-6 sm:p-8 mt-2 border border-slate-200 shadow-md">
+                  
+                  {/* En-tête officiel République du Congo */}
+                  <div className="flex items-start justify-between border-b-2 border-slate-900 pb-4 mb-4">
+                    <div className="space-y-1 text-left max-w-sm">
+                      <p className="text-[10px] font-black uppercase tracking-widest text-slate-700">
+                        RÉPUBLIQUE DU CONGO
+                      </p>
+                      <p className="text-[9px] uppercase text-slate-500 font-semibold tracking-wider">
+                        Unité • Travail • Progrès
+                      </p>
+                      <p className="text-[9px] text-slate-600 uppercase font-semibold pt-1">
+                        MINISTÈRE DE L'ENSEIGNEMENT PRIMAIRE, SECONDAIRE ET DE L'ALPHABÉTISATION
+                      </p>
+                      <h3 className="text-sm font-extrabold uppercase text-indigo-900 pt-1">
+                        {establishment?.name || 'ÉTABLISSEMENT SCOLAIRE'}
+                      </h3>
+                      <p className="text-[10px] text-slate-600">
+                        {establishment?.address ? `${establishment.address}, ` : ''}{establishment?.city || 'Brazzaville'} • Tél : {establishment?.phone || '+242 06 000 0000'}
+                      </p>
+                    </div>
+
+                    {/* Cadre Photo d'identité officielle */}
+                    <div className="flex flex-col items-center">
+                      <div className="w-28 h-36 border-2 border-slate-800 rounded bg-slate-50 overflow-hidden flex flex-col items-center justify-center p-0.5 shadow-sm">
+                        {selectedStudent.student.photo_data ? (
+                          <img
+                            src={selectedStudent.student.photo_data}
+                            alt="Photo d'identité officielle"
+                            className="w-full h-full object-cover"
+                          />
+                        ) : (
+                          <div className="text-center p-2 text-slate-400">
+                            <Camera className="w-8 h-8 mx-auto mb-1 opacity-40" />
+                            <span className="text-[8px] uppercase font-bold text-slate-500 block leading-tight">
+                              PHOTO D'IDENTITÉ OFFICIELLE 3.5×4.5
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                      <span className="text-[9px] text-slate-500 font-mono mt-1 font-semibold">
+                        {selectedStudent.student.matricule}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Titre du document */}
+                  <div className="text-center my-4 py-2 bg-indigo-50 border-y border-indigo-200">
+                    <h2 className="text-base sm:text-lg font-black uppercase tracking-wider text-indigo-950">
+                      FICHE INDIVIDUELLE D'INSCRIPTION SCOLAIRE
+                    </h2>
+                    <p className="text-xs font-semibold text-indigo-800">
+                      Année Scolaire {selectedStudent.student.academic_year || establishment?.academic_year || '2026-2027'}
+                    </p>
+                  </div>
+
+                  {/* Tableau d'identification de l'élève */}
+                  <div className="space-y-4 text-xs">
+                    
+                    {/* 1. État Civil */}
+                    <div>
+                      <h4 className="text-[11px] font-black uppercase tracking-wider text-slate-800 border-b border-slate-300 pb-1 mb-2">
+                        1. Identité Civile de l'Élève
+                      </h4>
+                      <table className="w-full border-collapse">
+                        <tbody>
+                          <tr className="border-b border-slate-200">
+                            <td className="py-1.5 font-bold text-slate-700 w-1/3">Nom de famille (Patronyme) :</td>
+                            <td className="py-1.5 font-black text-slate-900 text-sm uppercase">
+                              {selectedStudent.student.last_name}
+                            </td>
+                          </tr>
+                          <tr className="border-b border-slate-200">
+                            <td className="py-1.5 font-bold text-slate-700">Prénom(s) déclarés :</td>
+                            <td className="py-1.5 font-semibold text-slate-900">
+                              {selectedStudent.student.first_name}
+                            </td>
+                          </tr>
+                          {selectedStudent.student.post_name && (
+                            <tr className="border-b border-slate-200">
+                              <td className="py-1.5 font-bold text-slate-700">Post-nom / Deuxième nom :</td>
+                              <td className="py-1.5 text-slate-900">{selectedStudent.student.post_name}</td>
+                            </tr>
+                          )}
+                          <tr className="border-b border-slate-200">
+                            <td className="py-1.5 font-bold text-slate-700">Sexe :</td>
+                            <td className="py-1.5 text-slate-900 font-semibold">
+                              {selectedStudent.student.gender === 'M' ? 'Masculin (M)' : 'Féminin (F)'}
+                            </td>
+                          </tr>
+                          <tr className="border-b border-slate-200">
+                            <td className="py-1.5 font-bold text-slate-700">Date et lieu de naissance :</td>
+                            <td className="py-1.5 text-slate-900">
+                              {selectedStudent.student.birth_date} à {selectedStudent.student.birth_place || 'Brazzaville'}
+                            </td>
+                          </tr>
+                          <tr className="border-b border-slate-200">
+                            <td className="py-1.5 font-bold text-slate-700">Adresse de résidence :</td>
+                            <td className="py-1.5 text-slate-900">{selectedStudent.student.address || 'Non spécifiée'}</td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+
+                    {/* 2. Scolarité */}
+                    <div>
+                      <h4 className="text-[11px] font-black uppercase tracking-wider text-slate-800 border-b border-slate-300 pb-1 mb-2">
+                        2. Affectation Scolaire & Classe
+                      </h4>
+                      <div className="grid grid-cols-2 gap-4 bg-slate-50 p-3 rounded-lg border border-slate-200">
+                        <div>
+                          <span className="text-[10px] text-slate-500 uppercase font-semibold">Classe affectée</span>
+                          <p className="font-extrabold text-indigo-900 text-sm mt-0.5">
+                            {selectedStudent.student.class_name || 'En attente d’affectation'}
+                          </p>
+                        </div>
+                        <div>
+                          <span className="text-[10px] text-slate-500 uppercase font-semibold">Niveau / Cycle</span>
+                          <p className="font-bold text-slate-800 mt-0.5">
+                            {selectedStudent.student.level_code || '—'} ({selectedStudent.student.cycle_code || 'Général'})
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* 3. Responsable Légal */}
+                    <div>
+                      <h4 className="text-[11px] font-black uppercase tracking-wider text-slate-800 border-b border-slate-300 pb-1 mb-2">
+                        3. Responsable Légal & Contact d'Urgence
+                      </h4>
+                      <table className="w-full border-collapse">
+                        <tbody>
+                          <tr className="border-b border-slate-200">
+                            <td className="py-1.5 font-bold text-slate-700 w-1/3">Nom du Parent / Tuteur :</td>
+                            <td className="py-1.5 font-bold text-slate-900">
+                              {selectedStudent.student.guardian_name} ({selectedStudent.student.guardian_relation})
+                            </td>
+                          </tr>
+                          <tr className="border-b border-slate-200">
+                            <td className="py-1.5 font-bold text-slate-700">Téléphone de contact :</td>
+                            <td className="py-1.5 font-mono font-bold text-slate-900">
+                              {selectedStudent.student.guardian_phone}
+                            </td>
+                          </tr>
+                          {selectedStudent.student.guardian_email && (
+                            <tr className="border-b border-slate-200">
+                              <td className="py-1.5 font-bold text-slate-700">Adresse Email :</td>
+                              <td className="py-1.5 text-slate-900">{selectedStudent.student.guardian_email}</td>
+                            </tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+
+                    {/* Bloc Signatures et Cachet */}
+                    <div className="pt-6 border-t border-slate-300 grid grid-cols-2 gap-8 text-center">
+                      <div className="space-y-12">
+                        <p className="text-[11px] font-bold text-slate-700 uppercase">
+                          Le Responsable Légal<br />(Signature précédée de la mention "Lu et approuvé")
+                        </p>
+                        <div className="h-10 border-b border-dashed border-slate-400 mx-6" />
+                      </div>
+                      <div className="space-y-12">
+                        <p className="text-[11px] font-bold text-slate-700 uppercase">
+                          La Direction de l'Établissement<br />(Cachet officiel & Signature)
+                        </p>
+                        <div className="h-10 border-b border-dashed border-slate-400 mx-6" />
+                      </div>
+                    </div>
+
+                  </div>
+
+                </div>
+
+                {/* Actions du dossier Fiche */}
+                <div className="flex flex-wrap items-center justify-between gap-2 pt-4 border-t border-slate-800 no-print">
+                  <div className="flex items-center space-x-2">
+                    {canEdit && (
+                      <>
+                        <button
+                          onClick={() => setShowTransferModal(true)}
+                          className="px-3 py-1.5 bg-amber-600/20 hover:bg-amber-600/30 text-amber-300 border border-amber-600/30 rounded-lg text-xs font-semibold flex items-center space-x-1"
+                        >
+                          <ArrowRightLeft className="w-3.5 h-3.5" />
+                          <span>Transférer</span>
+                        </button>
+                        <button
+                          onClick={() => handleArchive(selectedStudent.student.id, `${selectedStudent.student.last_name} ${selectedStudent.student.first_name}`)}
+                          className="px-3 py-1.5 bg-rose-600/20 hover:bg-rose-600/30 text-rose-300 border border-rose-600/30 rounded-lg text-xs font-semibold flex items-center space-x-1"
+                        >
+                          <Archive className="w-3.5 h-3.5" />
+                          <span>Archiver Dossier</span>
+                        </button>
+                      </>
+                    )}
+                  </div>
+
+                  <button
+                    onClick={() => window.print()}
+                    className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold flex items-center space-x-2 shadow-lg transition cursor-pointer"
+                  >
+                    <Printer className="w-4 h-4" />
+                    <span>Imprimer la Fiche d'Inscription</span>
+                  </button>
+                </div>
+              </>
+            )}
+
+            {/* VUE 2 : PAIEMENTS & QUITTANCES DE L'ÉLÈVE */}
+            {detailTab === 'payments' && (
+              <div className="space-y-4 no-print">
+                {/* Carte de situation financière */}
+                {selectedStudent.financialSituation && (
+                  <div className="bg-slate-800/80 border border-slate-700 rounded-xl p-4 grid grid-cols-1 sm:grid-cols-3 gap-3 text-center">
+                    <div className="p-2.5 bg-slate-900/60 rounded-lg border border-slate-800">
+                      <span className="text-[10px] text-slate-400 uppercase font-semibold block">Total Dû (Exigible)</span>
+                      <p className="text-base font-black font-mono text-white mt-1">
+                        {(selectedStudent.financialSituation.totalDue || 0).toLocaleString('fr-FR')} FCFA
+                      </p>
+                    </div>
+                    <div className="p-2.5 bg-slate-900/60 rounded-lg border border-slate-800">
+                      <span className="text-[10px] text-emerald-400 uppercase font-semibold block">Total Déjà Payé</span>
+                      <p className="text-base font-black font-mono text-emerald-400 mt-1">
+                        {(selectedStudent.financialSituation.totalPaid || 0).toLocaleString('fr-FR')} FCFA
+                      </p>
+                    </div>
+                    <div className="p-2.5 bg-slate-900/60 rounded-lg border border-slate-800">
+                      <span className="text-[10px] text-rose-400 uppercase font-semibold block">Reste à Payer (Solde)</span>
+                      <p className="text-base font-black font-mono text-rose-400 mt-1">
+                        {(selectedStudent.financialSituation.balance || 0).toLocaleString('fr-FR')} FCFA
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                {/* Barre d'outils quittances élève */}
+                <div className="flex flex-wrap items-center justify-between gap-2 p-3 bg-slate-800/60 rounded-xl border border-slate-700">
+                  <div className="flex items-center space-x-2">
+                    <span className="text-xs text-slate-300 font-medium">
+                      Historique des quittances : <strong className="text-white">{selectedStudent.payments?.length || 0}</strong>
+                    </span>
+                    {selectedStudentPaymentIds.length > 0 && (
+                      <span className="px-2 py-0.5 bg-teal-500/20 text-teal-300 border border-teal-500/30 rounded text-[11px] font-bold">
+                        {selectedStudentPaymentIds.length} sélectionnée(s)
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="flex items-center space-x-2">
+                    {selectedStudentPaymentIds.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const toPrint = (selectedStudent.payments || []).filter((p: Payment) =>
+                            selectedStudentPaymentIds.includes(p.id)
+                          );
+                          if (toPrint.length > 0) setReceiptsToPrint(toPrint);
+                        }}
+                        className="px-3 py-1.5 bg-teal-600 hover:bg-teal-500 text-white rounded-lg text-xs font-bold flex items-center space-x-1 shadow cursor-pointer"
+                      >
+                        <Printer className="w-3.5 h-3.5" />
+                        <span>Imprimer la sélection</span>
+                      </button>
+                    )}
+
+                    <button
+                      type="button"
+                      onClick={() => setShowStatementModal(true)}
+                      className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-bold flex items-center space-x-1.5 shadow cursor-pointer"
+                    >
+                      <FileText className="w-3.5 h-3.5" />
+                      <span>Relevé de Paiements de l'Élève</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Table des quittances de cet élève */}
+                <div className="border border-slate-800 rounded-xl overflow-hidden bg-slate-900">
+                  {(!selectedStudent.payments || selectedStudent.payments.length === 0) ? (
+                    <div className="p-8 text-center text-slate-400 text-xs">
+                      Aucun versement n'a été enregistré pour cet élève.
+                    </div>
+                  ) : (
+                    <table className="w-full text-left text-xs text-slate-300">
+                      <thead className="bg-slate-800/80 text-[10px] uppercase text-slate-400 border-b border-slate-800">
+                        <tr>
+                          <th className="p-3 w-8 text-center">
+                            <input
+                              type="checkbox"
+                              checked={
+                                selectedStudent.payments.length > 0 &&
+                                selectedStudentPaymentIds.length === selectedStudent.payments.length
+                              }
+                              onChange={(e) => {
+                                if (e.target.checked) {
+                                  setSelectedStudentPaymentIds(selectedStudent.payments.map((p: any) => p.id));
+                                } else {
+                                  setSelectedStudentPaymentIds([]);
+                                }
+                              }}
+                              className="rounded border-slate-700 text-teal-600 focus:ring-teal-500 cursor-pointer"
+                            />
+                          </th>
+                          <th className="p-3">N° Quittance</th>
+                          <th className="p-3">Date</th>
+                          <th className="p-3">Motif</th>
+                          <th className="p-3">Mode</th>
+                          <th className="p-3 text-right">Montant Versé</th>
+                          <th className="p-3">Statut</th>
+                          <th className="p-3 text-right">Action</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-800/60">
+                        {selectedStudent.payments.map((p: Payment) => (
+                          <tr key={p.id} className="hover:bg-slate-800/40">
+                            <td className="p-3 text-center">
+                              <input
+                                type="checkbox"
+                                checked={selectedStudentPaymentIds.includes(p.id)}
+                                onChange={(e) => {
+                                  if (e.target.checked) {
+                                    setSelectedStudentPaymentIds((prev) => [...prev, p.id]);
+                                  } else {
+                                    setSelectedStudentPaymentIds((prev) => prev.filter((id) => id !== p.id));
+                                  }
+                                }}
+                                className="rounded border-slate-700 text-teal-600 focus:ring-teal-500 cursor-pointer"
+                              />
+                            </td>
+                            <td className="p-3 font-mono font-bold text-amber-400">
+                              {p.receipt_number}
+                              {p.reprint_count ? (
+                                <span className="ml-1 text-[9px] text-amber-300">({p.reprint_count}x)</span>
+                              ) : null}
+                            </td>
+                            <td className="p-3 text-slate-400 font-mono text-[11px]">
+                              {new Date(p.created_at).toLocaleDateString('fr-FR')}
+                            </td>
+                            <td className="p-3 text-slate-200">
+                              {p.notes || p.payment_type || 'Frais de scolarité'}
+                            </td>
+                            <td className="p-3 text-slate-300 font-medium">{p.payment_method}</td>
+                            <td className="p-3 text-right font-black font-mono text-white">
+                              {p.amount.toLocaleString('fr-FR')} FCFA
+                            </td>
+                            <td className="p-3">
+                              <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold ${
+                                p.status === 'VALIDE'
+                                  ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
+                                  : 'bg-rose-500/15 text-rose-300 border border-rose-500/30'
+                              }`}>
+                                {p.status}
+                              </span>
+                            </td>
+                            <td className="p-3 text-right whitespace-nowrap">
+                              <button
+                                type="button"
+                                onClick={() => setReceiptsToPrint([p])}
+                                className="px-2.5 py-1 bg-slate-800 hover:bg-teal-600 text-teal-300 hover:text-white rounded-lg text-xs font-semibold inline-flex items-center space-x-1 transition cursor-pointer"
+                                title="Imprimer ou réimprimer la quittance"
+                              >
+                                <Printer className="w-3.5 h-3.5" />
+                                <span>Quittance</span>
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -1070,6 +1268,35 @@ export const StudentsView: React.FC = () => {
             </div>
           </div>
         </div>
+      )}
+      {receiptsToPrint && receiptsToPrint.length > 0 && (
+        <PaymentReceiptModal
+          payments={receiptsToPrint}
+          establishment={establishment!}
+          onClose={() => setReceiptsToPrint(null)}
+          onPaymentUpdated={(updated) => {
+            if (selectedStudent && selectedStudent.payments) {
+              setSelectedStudent({
+                ...selectedStudent,
+                payments: selectedStudent.payments.map((p: any) =>
+                  p.id === updated.id ? updated : p
+                ),
+              });
+            }
+          }}
+        />
+      )}
+
+      {/* MODAL RELEVÉ INDIVIDUEL DE PAIEMENTS */}
+      {showStatementModal && selectedStudent && (
+        <StudentStatementModal
+          student={selectedStudent.student}
+          payments={selectedStudent.payments || []}
+          financialSituation={selectedStudent.financialSituation}
+          establishment={establishment!}
+          onClose={() => setShowStatementModal(false)}
+          onPrintReceipt={(p) => setReceiptsToPrint([p])}
+        />
       )}
 
     </div>

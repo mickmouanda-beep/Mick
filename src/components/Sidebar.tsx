@@ -15,6 +15,7 @@ import {
   ChevronRight,
   GraduationCap,
   Terminal,
+  CalendarDays,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext.tsx';
 import { UserRole } from '../types.ts';
@@ -27,6 +28,7 @@ export type ActiveTab =
   | 'students'
   | 'lessons'
   | 'teachers'
+  | 'schedules'
   | 'grades'
   | 'attendance'
   | 'finance'
@@ -100,6 +102,13 @@ const NAV_ITEMS: NavItem[] = [
     icon: UserCheck,
     allowedRoles: ['PROMOTEUR', 'DIRECTEUR_GENERAL', 'DIRECTEUR_ETUDES', 'ENSEIGNANT', 'COMPTABLE'],
     description: 'Affectations, horaires & fiches pro',
+  },
+  {
+    id: 'schedules',
+    label: 'Emploi du temps des cours',
+    icon: CalendarDays,
+    allowedRoles: ['PROMOTEUR', 'DIRECTEUR_GENERAL', 'DIRECTEUR_ETUDES', 'ENSEIGNANT', 'ELEVE', 'PARENT', 'SURVEILLANT'],
+    description: 'Planning hebdomadaire & journalier des cours',
   },
   {
     id: 'grades',
@@ -182,6 +191,17 @@ export const Sidebar: React.FC<SidebarProps> = ({
           {accessibleItems.map((item) => {
             const Icon = item.icon;
             const isActive = currentTab === item.id;
+            let displayLabel = item.label;
+            if (item.id === 'schedules') {
+              if (user.role === 'ENSEIGNANT' || user.role === 'ELEVE') {
+                displayLabel = 'Mon emploi du temps';
+              } else if (user.role === 'PARENT') {
+                displayLabel = 'Emploi du temps de mon enfant';
+              } else {
+                displayLabel = 'Emploi du temps des cours';
+              }
+            }
+
             return (
               <button
                 key={item.id}
@@ -197,7 +217,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
               >
                 <div className="flex items-center space-x-3 truncate">
                   <Icon className={`w-4 h-4 shrink-0 ${isActive ? 'text-white' : 'text-slate-400'}`} />
-                  <span className="truncate">{item.label}</span>
+                  <span className="truncate">{displayLabel}</span>
                 </div>
                 {isActive && <ChevronRight className="w-4 h-4 text-indigo-200" />}
               </button>

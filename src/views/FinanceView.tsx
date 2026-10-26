@@ -22,7 +22,9 @@ import { api } from '../lib/api.ts';
 import { useAuth } from '../context/AuthContext.tsx';
 import { Payment, Expense, FeeStructure, Student, SchoolTariffPlan } from '../types.ts';
 import { PrintableReceipt } from '../components/PrintableReceipt.tsx';
-import { OFFICIAL_CYCLES } from '../constants.ts';
+import { PaymentReceiptModal } from '../components/PaymentReceiptModal.tsx';
+import { StudentStatementModal } from '../components/StudentStatementModal.tsx';
+import { OFFICIAL_CYCLES, MONTANT_MIN, MONTANT_MAX } from '../constants.ts';
 
 export const FinanceView: React.FC = () => {
   const { establishment, hasRole, user } = useAuth();
@@ -56,6 +58,7 @@ export const FinanceView: React.FC = () => {
   // Modal Encaisser Paiement
   const [showPaymentModal, setShowPaymentModal] = useState(false);
   const [payStudentId, setPayStudentId] = useState('');
+  const [payPayerName, setPayPayerName] = useState('');
   const [payType, setPayType] = useState('FRAIS_MENSUELS');
   const [payAmount, setPayAmount] = useState<number>(25000);
   const [payMethod, setPayMethod] = useState<'ESPECES' | 'AIRTEL_MONEY' | 'MTN_MOMO' | 'CHEQUE' | 'VIREMENT'>('ESPECES');
@@ -90,8 +93,13 @@ export const FinanceView: React.FC = () => {
   const [cancelPaymentId, setCancelPaymentId] = useState('');
   const [cancelReason, setCancelReason] = useState('');
 
-  // Impression Reçu
-  const [receiptToPrint, setReceiptToPrint] = useState<Payment | null>(null);
+  // Impression Quittances (unique ou groupée)
+  const [selectedReceipts, setSelectedReceipts] = useState<Payment[] | null>(null);
+  const [selectedPaymentIds, setSelectedPaymentIds] = useState<string[]>([]);
+
+  // Relevé de paiements de l'élève
+  const [statementData, setStatementData] = useState<{ student: Student; payments: Payment[]; financialSituation?: any } | null>(null);
+  const [loadingStatement, setLoadingStatement] = useState(false);
 
   // Recherche balances
   const [balanceSearch, setBalanceSearch] = useState('');
@@ -177,28 +185,57 @@ export const FinanceView: React.FC = () => {
     e.preventDefault();
     setError(null);
 
-    if (!payStudentId || !payAmount || payAmount < 50 || payAmount > 1000000) {
-      setError('Veuillez sélectionner un élève et indiquer un montant valide (entre 50 et 1 000 000 FCFA).');
+    const numAmount = Number(payAmount);
+    if (!payStudentId || isNaN(numAmount) || numAmount < MONTANT_MIN || numAmount > MONTANT_MAX) {
+      setError(`Le montant doit être compris entre ${MONTANT_MIN} F et ${MONTANT_MAX.toLocaleString('fr-FR')} F.`);
       return;
     }
 
     try {
       const res = await api.createPayment({
         studentId: payStudentId,
-        amount: Number(payAmount),
+        amount: numAmount,
         paymentMethod: payMethod,
         paymentType: payType,
         transactionReference: payRef.trim() || null,
         notes: payNotes.trim() || null,
+        payerName: payPayerName.trim() || undefined,
       });
 
       setSuccess(`Quittance N° ${res.receiptNumber} émise avec succès.`);
       setShowPaymentModal(false);
       setPayRef('');
       setPayNotes('');
+      setPayPayerName('');
+
       await loadData();
+
+      // Proposer ou ouvrir immédiatement l'impression de la quittance
+      if (res.payment) {
+        setSelectedReceipts([res.payment]);
+      } else {
+        const found = payments.find((p) => p.receipt_number === res.receiptNumber);
+        if (found) setSelectedReceipts([found]);
+      }
     } catch (err: any) {
       setError(err.message);
+    }
+  };
+
+  const handleOpenStudentStatement = async (studentId: string) => {
+    setLoadingStatement(true);
+    setError(null);
+    try {
+      const res = await api.getStudentById(studentId);
+      setStatementData({
+        student: res.student,
+        payments: res.payments || [],
+        financialSituation: res.financialSituation,
+      });
+    } catch (err: any) {
+      setError(err.message || 'Impossible de charger le relevé de paiements de l’élève.');
+    } finally {
+      setLoadingStatement(false);
     }
   };
 
@@ -509,73 +546,154 @@ export const FinanceView: React.FC = () => {
               </p>
             </div>
           ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs text-slate-300">
-                <thead className="bg-slate-800/60 text-slate-400 uppercase tracking-wider text-[10px] border-b border-slate-800">
-                  <tr>
-                    <th className="p-3.5">N° Quittance</th>
-                    <th className="p-3.5">Date & Heure</th>
-                    <th className="p-3.5">Élève & Matricule</th>
-                    <th className="p-3.5">Classe</th>
-                    <th className="p-3.5">Mode Règlement</th>
-                    <th className="p-3.5">Montant Versé</th>
-                    <th className="p-3.5">Caissier</th>
-                    <th className="p-3.5">Statut</th>
-                    <th className="p-3.5 text-right">Actions</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-800/60">
-                  {payments.map((p, idx) => (
-                    <tr key={p.id ? `${p.id}-${idx}` : idx} className="hover:bg-slate-800/40 transition">
-                      <td className="p-3.5 font-mono font-bold text-amber-400">{p.receipt_number}</td>
-                      <td className="p-3.5 text-slate-400 font-mono text-[11px]">
-                        {new Date(p.created_at).toLocaleString('fr-FR')}
-                      </td>
-                      <td className="p-3.5 font-semibold text-white">
-                        {p.last_name} {p.first_name}
-                        <span className="block text-[10px] text-slate-500 font-mono">{p.matricule}</span>
-                      </td>
-                      <td className="p-3.5 font-semibold text-indigo-300">{p.class_name || '-'}</td>
-                      <td className="p-3.5 font-medium text-slate-300">{p.payment_method}</td>
-                      <td className="p-3.5 font-black text-white font-mono text-sm">
-                        {p.amount.toLocaleString('fr-FR')} FCFA
-                      </td>
-                      <td className="p-3.5 text-slate-400 text-[11px]">{p.cashier_name}</td>
-                      <td className="p-3.5">
-                        <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                          p.status === 'VALIDE'
-                            ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
-                            : 'bg-rose-500/15 text-rose-300 border border-rose-500/30'
-                        }`}>
-                          {p.status}
-                        </span>
-                      </td>
-                      <td className="p-3.5 text-right space-x-1.5">
-                        <button
-                          onClick={() => setReceiptToPrint(p)}
-                          className="p-1.5 text-indigo-400 hover:text-white hover:bg-slate-800 rounded transition"
-                          title="Imprimer la quittance"
-                        >
-                          <Printer className="w-4 h-4" />
-                        </button>
+            <div>
+              {/* BARRE D'ACTIONS GROUPÉES (IMPRESSION MULTIPLE) */}
+              {selectedPaymentIds.length > 0 && (
+                <div className="bg-teal-950/80 border-b border-teal-800 p-3 px-4 flex flex-wrap items-center justify-between gap-3 text-xs">
+                  <div className="flex items-center space-x-2 text-teal-200">
+                    <Receipt className="w-4 h-4 text-teal-400" />
+                    <span>
+                      <strong className="text-white font-bold">{selectedPaymentIds.length}</strong> quittance(s) sélectionnée(s)
+                    </span>
+                  </div>
+                  <div className="flex items-center space-x-2">
+                    <button
+                      type="button"
+                      onClick={() => setSelectedPaymentIds([])}
+                      className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs"
+                    >
+                      Désélectionner tout
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const toPrint = payments.filter((p) => selectedPaymentIds.includes(p.id));
+                        if (toPrint.length > 0) setSelectedReceipts(toPrint);
+                      }}
+                      className="px-4 py-1.5 bg-teal-600 hover:bg-teal-500 text-white rounded-lg font-bold text-xs flex items-center space-x-1.5 shadow"
+                    >
+                      <Printer className="w-3.5 h-3.5" />
+                      <span>Imprimer les {selectedPaymentIds.length} quittances</span>
+                    </button>
+                  </div>
+                </div>
+              )}
 
-                        {canManageFinance && p.status === 'VALIDE' && (
-                          <button
-                            onClick={() => {
-                              setCancelPaymentId(p.id);
-                              setShowCancelModal(true);
-                            }}
-                            className="p-1.5 text-rose-400 hover:text-white hover:bg-rose-950 rounded transition"
-                            title="Annuler la quittance (avec motif obligatoire)"
-                          >
-                            <Ban className="w-4 h-4" />
-                          </button>
-                        )}
-                      </td>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs text-slate-300">
+                  <thead className="bg-slate-800/60 text-slate-400 uppercase tracking-wider text-[10px] border-b border-slate-800">
+                    <tr>
+                      <th className="p-3.5 w-10 text-center">
+                        <input
+                          type="checkbox"
+                          checked={payments.length > 0 && selectedPaymentIds.length === payments.length}
+                          onChange={(e) => {
+                            if (e.target.checked) {
+                              setSelectedPaymentIds(payments.map((p) => p.id));
+                            } else {
+                              setSelectedPaymentIds([]);
+                            }
+                          }}
+                          className="rounded border-slate-700 text-teal-600 focus:ring-teal-500 cursor-pointer"
+                          title="Tout sélectionner pour impression multiple"
+                        />
+                      </th>
+                      <th className="p-3.5">N° Quittance</th>
+                      <th className="p-3.5">Date & Heure</th>
+                      <th className="p-3.5">Élève & Matricule</th>
+                      <th className="p-3.5">Classe</th>
+                      <th className="p-3.5">Payeur</th>
+                      <th className="p-3.5">Mode Règlement</th>
+                      <th className="p-3.5">Montant Versé</th>
+                      <th className="p-3.5">Caissier</th>
+                      <th className="p-3.5">Statut</th>
+                      <th className="p-3.5 text-right">Actions</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/60">
+                    {payments.map((p, idx) => {
+                      const isSelected = selectedPaymentIds.includes(p.id);
+                      return (
+                        <tr
+                          key={p.id ? `${p.id}-${idx}` : idx}
+                          className={`hover:bg-slate-800/40 transition ${
+                            isSelected ? 'bg-teal-950/20' : ''
+                          }`}
+                        >
+                          <td className="p-3.5 text-center">
+                            <input
+                              type="checkbox"
+                              checked={isSelected}
+                              onChange={(e) => {
+                                if (e.target.checked) {
+                                  setSelectedPaymentIds((prev) => [...prev, p.id]);
+                                } else {
+                                  setSelectedPaymentIds((prev) => prev.filter((id) => id !== p.id));
+                                }
+                              }}
+                              className="rounded border-slate-700 text-teal-600 focus:ring-teal-500 cursor-pointer"
+                            />
+                          </td>
+                          <td className="p-3.5 font-mono font-bold text-amber-400">
+                            {p.receipt_number}
+                            {p.reprint_count ? (
+                              <span className="ml-1.5 px-1.5 py-0.2 bg-amber-500/20 text-amber-300 border border-amber-500/30 rounded text-[9px] font-sans font-semibold">
+                                Duplicata ({p.reprint_count})
+                              </span>
+                            ) : null}
+                          </td>
+                          <td className="p-3.5 text-slate-400 font-mono text-[11px]">
+                            {new Date(p.created_at).toLocaleString('fr-FR')}
+                          </td>
+                          <td className="p-3.5 font-semibold text-white">
+                            {p.last_name} {p.first_name}
+                            <span className="block text-[10px] text-slate-500 font-mono">{p.matricule}</span>
+                          </td>
+                          <td className="p-3.5 font-semibold text-indigo-300">{p.class_name || '-'}</td>
+                          <td className="p-3.5 text-slate-300 text-[11px]">{p.payer_name || 'Parent / Tuteur'}</td>
+                          <td className="p-3.5 font-medium text-slate-300">{p.payment_method}</td>
+                          <td className="p-3.5 font-black text-white font-mono text-sm">
+                            {p.amount.toLocaleString('fr-FR')} FCFA
+                          </td>
+                          <td className="p-3.5 text-slate-400 text-[11px]">{p.cashier_name}</td>
+                          <td className="p-3.5">
+                            <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                              p.status === 'VALIDE'
+                                ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
+                                : 'bg-rose-500/15 text-rose-300 border border-rose-500/30'
+                            }`}>
+                              {p.status}
+                            </span>
+                          </td>
+                          <td className="p-3.5 text-right space-x-1.5 whitespace-nowrap">
+                            <button
+                              onClick={() => setSelectedReceipts([p])}
+                              className="px-2.5 py-1 text-teal-400 hover:text-white bg-slate-800 hover:bg-teal-600 rounded-lg text-xs font-semibold inline-flex items-center space-x-1 transition cursor-pointer"
+                              title="Réimprimer la quittance officielle"
+                            >
+                              <Printer className="w-3.5 h-3.5" />
+                              <span className="hidden sm:inline">Quittance</span>
+                            </button>
+
+                            {canManageFinance && p.status === 'VALIDE' && (
+                              <button
+                                onClick={() => {
+                                  setCancelPaymentId(p.id);
+                                  setShowCancelModal(true);
+                                }}
+                                className="p-1.5 text-rose-400 hover:text-white hover:bg-rose-950 rounded-lg transition"
+                                title="Annuler la quittance (motif obligatoire)"
+                              >
+                                <Ban className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
             </div>
           )}
         </div>
@@ -612,6 +730,7 @@ export const FinanceView: React.FC = () => {
                   <th className="p-3.5">Total Versé</th>
                   <th className="p-3.5">Reste à Payer (Solde)</th>
                   <th className="p-3.5">État du Dossier</th>
+                  <th className="p-3.5 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/60">
@@ -644,6 +763,18 @@ export const FinanceView: React.FC = () => {
                       }`}>
                         {b.paymentStatus}
                       </span>
+                    </td>
+                    <td className="p-3.5 text-right whitespace-nowrap">
+                      <button
+                        type="button"
+                        disabled={loadingStatement}
+                        onClick={() => handleOpenStudentStatement(b.id)}
+                        className="px-2.5 py-1 text-indigo-300 hover:text-white bg-slate-800 hover:bg-indigo-600 rounded-lg text-xs font-semibold inline-flex items-center space-x-1 transition cursor-pointer"
+                        title="Consulter et imprimer le relevé de paiements de cet élève"
+                      >
+                        <FileText className="w-3.5 h-3.5" />
+                        <span>Relevé</span>
+                      </button>
                     </td>
                   </tr>
                 ))}
@@ -1164,7 +1295,14 @@ export const FinanceView: React.FC = () => {
                 <select
                   required
                   value={payStudentId}
-                  onChange={(e) => setPayStudentId(e.target.value)}
+                  onChange={(e) => {
+                    const sId = e.target.value;
+                    setPayStudentId(sId);
+                    const foundStu = allStudents.find((s) => s.id === sId);
+                    if (foundStu && foundStu.guardian_name && !payPayerName) {
+                      setPayPayerName(foundStu.guardian_name);
+                    }
+                  }}
                   className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white"
                 >
                   <option value="">Sélectionner l'élève...</option>
@@ -1174,6 +1312,29 @@ export const FinanceView: React.FC = () => {
                     </option>
                   ))}
                 </select>
+              </div>
+
+              {payStudentId && (() => {
+                const bal = studentBalances.find((b) => b.id === payStudentId);
+                return bal ? (
+                  <div className="p-2.5 bg-slate-800/80 border border-slate-700 rounded-lg flex items-center justify-between text-xs">
+                    <span className="text-slate-400">Solde restant dû pour cet élève :</span>
+                    <span className="font-mono font-black text-amber-400 text-sm">
+                      {bal.balance.toLocaleString('fr-FR')} FCFA
+                    </span>
+                  </div>
+                ) : null;
+              })()}
+
+              <div>
+                <label className="block text-slate-300 mb-1 font-semibold">Nom du Parent / Payeur</label>
+                <input
+                  type="text"
+                  placeholder="Ex: Nom complet du parent ou payeur..."
+                  value={payPayerName}
+                  onChange={(e) => setPayPayerName(e.target.value)}
+                  className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white"
+                />
               </div>
 
               <div>
@@ -1196,12 +1357,17 @@ export const FinanceView: React.FC = () => {
                   <input
                     type="number"
                     step="1"
-                    min="50"
+                    inputMode="numeric"
+                    min={MONTANT_MIN}
+                    max={MONTANT_MAX}
                     required
                     value={payAmount}
                     onChange={(e) => setPayAmount(Number(e.target.value))}
                     className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white font-mono font-bold text-sm"
                   />
+                  <span className="block text-[10px] text-slate-400 mt-1 font-mono">
+                    Affichage : {payAmount.toLocaleString('fr-FR')} FCFA
+                  </span>
                 </div>
 
                 <div>
@@ -1491,35 +1657,28 @@ export const FinanceView: React.FC = () => {
         </div>
       )}
 
-      {/* MODAL IMPRESSION QUITTANCE */}
-      {receiptToPrint && (
-        <div className="fixed inset-0 bg-slate-950/90 backdrop-blur-xs flex items-center justify-center p-4 z-50 overflow-y-auto">
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-2xl p-6 shadow-2xl my-8">
-            <div className="flex justify-between items-center mb-4">
-              <h2 className="text-sm font-bold text-white flex items-center space-x-2">
-                <Receipt className="w-4 h-4 text-teal-400" />
-                <span>Aperçu de la Quittance Officielle</span>
-              </h2>
-              <div className="flex items-center space-x-2">
-                <button
-                  onClick={() => window.print()}
-                  className="px-4 py-1.5 bg-teal-600 hover:bg-teal-500 text-white rounded-lg text-xs font-semibold flex items-center space-x-1.5 shadow"
-                >
-                  <Printer className="w-3.5 h-3.5" />
-                  <span>Imprimer le Reçu</span>
-                </button>
-                <button
-                  onClick={() => setReceiptToPrint(null)}
-                  className="text-slate-400 hover:text-white"
-                >
-                  <X className="w-5 h-5" />
-                </button>
-              </div>
-            </div>
+      {/* MODAL IMPRESSION QUITTANCE (UNIQUE OU MULTIPLE) */}
+      {selectedReceipts && selectedReceipts.length > 0 && (
+        <PaymentReceiptModal
+          payments={selectedReceipts}
+          establishment={establishment!}
+          onClose={() => setSelectedReceipts(null)}
+          onPaymentUpdated={(updated) => {
+            setPayments((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
+          }}
+        />
+      )}
 
-            <PrintableReceipt payment={receiptToPrint} establishment={establishment!} />
-          </div>
-        </div>
+      {/* MODAL RELEVÉ INDIVIDUEL DE PAIEMENTS DE L'ÉLÈVE */}
+      {statementData && (
+        <StudentStatementModal
+          student={statementData.student}
+          payments={statementData.payments}
+          financialSituation={statementData.financialSituation}
+          establishment={establishment!}
+          onClose={() => setStatementData(null)}
+          onPrintReceipt={(p) => setSelectedReceipts([p])}
+        />
       )}
 
     </div>

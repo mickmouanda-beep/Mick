@@ -294,6 +294,7 @@ export interface Payment {
   last_name?: string;
   matricule?: string;
   class_name?: string;
+  payment_type?: string;
   fee_structure_id?: string | null;
   amount: number;
   payment_method: 'ESPECES' | 'AIRTEL_MONEY' | 'MTN_MOMO' | 'CHEQUE' | 'VIREMENT';
@@ -305,6 +306,12 @@ export interface Payment {
   cancellation_reason?: string | null;
   cancelled_by?: string | null;
   cancelled_at?: string | null;
+  payer_name?: string | null;
+  reprint_count?: number;
+  last_reprinted_at?: string | null;
+  balance_after?: number | null;
+  total_due?: number | null;
+  total_paid_to_date?: number | null;
   created_at: string;
 }
 
@@ -708,5 +715,29 @@ export interface StaffSalaryParameter {
   active: number;
   updated_by: string;
   updated_at: string;
+}
+
+export interface CourseSchedule {
+  id: string;
+  establishment_id?: string;
+  class_id: string;
+  class_name?: string;
+  cycle_code?: string;
+  level_code?: string;
+  serie_code?: string | null;
+  subject_id: string;
+  subject_name?: string;
+  subject_code?: string;
+  teacher_id: string;
+  teacher_name?: string;
+  teacher_username?: string;
+  day_of_week: number; // 1: Lundi, 2: Mardi, 3: Mercredi, 4: Jeudi, 5: Vendredi, 6: Samedi
+  start_time: string; // HH:MM
+  end_time: string;   // HH:MM
+  room?: string | null;
+  is_published?: number; // 1 = Publié, 0 = Brouillon
+  academic_year?: string;
+  created_at?: string;
+  updated_at?: string;
 }
 

@@ -142,8 +142,31 @@ export const api = {
   // Enseignants
   getTeachers: () => request<any[]>('/teachers'),
   getMyAssignments: () => request<any[]>('/teachers/my-assignments'),
+  assignTeacherSubject: (teacherId: string, payload: { classId: string; subjectId: string; coefficient?: number; weeklyHours?: number }) =>
+    request<any>(`/teachers/${teacherId}/assignments`, { method: 'POST', body: JSON.stringify(payload) }),
+  removeTeacherAssignment: (teacherId: string, classSubjectId: string) =>
+    request<any>(`/teachers/${teacherId}/assignments/${classSubjectId}`, { method: 'DELETE' }),
   getCourseLogs: () => request<any[]>('/teachers/course-logs'),
   logCourseSession: (payload: any) => request<any>('/teachers/course-logs', { method: 'POST', body: JSON.stringify(payload) }),
+
+  // Emplois du temps des cours (Multi-rôles & Sécurisé)
+  getSchedules: (params: { classId?: string; teacherId?: string; studentId?: string; dayOfWeek?: number; status?: string } = {}) => {
+    const query = new URLSearchParams();
+    if (params.classId) query.append('classId', params.classId);
+    if (params.teacherId) query.append('teacherId', params.teacherId);
+    if (params.studentId) query.append('studentId', params.studentId);
+    if (params.dayOfWeek) query.append('dayOfWeek', String(params.dayOfWeek));
+    if (params.status) query.append('status', params.status);
+    return request<any[]>(`/academic/schedules?${query.toString()}`);
+  },
+  createSchedule: (payload: { classId: string; teacherId: string; subjectId: string; dayOfWeek: number; startTime: string; endTime: string; room?: string; isPublished?: boolean }) =>
+    request<any>('/academic/schedules', { method: 'POST', body: JSON.stringify(payload) }),
+  updateSchedule: (id: string, payload: { classId?: string; teacherId?: string; subjectId?: string; dayOfWeek?: number; startTime?: string; endTime?: string; room?: string; isPublished?: boolean }) =>
+    request<any>(`/academic/schedules/${id}`, { method: 'PUT', body: JSON.stringify(payload) }),
+  deleteSchedule: (id: string) => request<any>(`/academic/schedules/${id}`, { method: 'DELETE' }),
+  publishSchedules: (payload: { classId?: string; isPublished: boolean }) =>
+    request<any>('/academic/schedules/publish', { method: 'POST', body: JSON.stringify(payload) }),
+  getScheduleAudits: () => request<any[]>('/academic/schedules/audits'),
 
   // Évaluations & Notes
   getEvaluations: (params: { classId?: string; subjectId?: string; term?: string } = {}) => {
@@ -178,6 +201,7 @@ export const api = {
   getPayments: () => request<any[]>('/finance/payments'),
   createPayment: (payload: any) => request<any>('/finance/payments', { method: 'POST', body: JSON.stringify(payload) }),
   cancelPayment: (paymentId: string, reason: string) => request<any>(`/finance/payments/${paymentId}/cancel`, { method: 'POST', body: JSON.stringify({ cancellationReason: reason }) }),
+  logPaymentPrint: (paymentId: string) => request<any>(`/finance/payments/${paymentId}/log-print`, { method: 'POST' }),
   getExpenses: () => request<any[]>('/finance/expenses'),
   createExpense: (payload: any) => request<any>('/finance/expenses', { method: 'POST', body: JSON.stringify(payload) }),
   getCashInjections: () => request<any[]>('/finance/cash-injections'),

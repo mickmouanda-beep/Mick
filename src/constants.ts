@@ -390,4 +390,7 @@ export const CONGO_COLLEGE_CATALOG: CollegeClassRef[] = [
 
 export const OFFICIAL_COLLEGE_CLASSES: string[] = CONGO_COLLEGE_CATALOG.map((c) => c.code);
 
+export const MONTANT_MIN = 1;
+export const MONTANT_MAX = 1000000;
+
 
