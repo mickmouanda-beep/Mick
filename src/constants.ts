@@ -8,7 +8,7 @@ export interface CycleDefinition {
 }
 
 export const OFFICIAL_CYCLES: CycleDefinition[] = [
-  { code: 'PRE_SCOLAIRE', name: 'Préscolaire (Maternelle)', levels: ['P1', 'P2', 'P3'] },
+  { code: 'PRE_SCOLAIRE', name: 'Préscolaire (Maternelle)', levels: ['Petite Section', 'Moyenne Section', 'Grande Section'] },
   { code: 'PRIMAIRE', name: 'Enseignement Primaire', levels: ['CP1', 'CP2', 'CE1', 'CE2', 'CM1', 'CM2'] },
   { code: 'COLLEGE', name: 'Enseignement Secondaire 1er Cycle (Collège)', levels: ['6ème', '5ème', '4ème', '3ème'] },
   { code: 'LYCEE', name: 'Enseignement Secondaire 2nd Cycle (Lycée)', levels: ['Seconde', 'Première', 'Terminale'] },

@@ -230,9 +230,84 @@
         "created_at": { "type": "string" }
       },
       "required": ["id", "establishment_id", "action", "entity_type"]
+    },
+    "curriculum_program": {
+      "title": "CurriculumProgram",
+      "description": "School curriculum program books, guides and official reference documents.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "establishment_id": { "type": "string" },
+        "title": { "type": "string" },
+        "subject_name": { "type": "string" },
+        "class_name": { "type": "string" },
+        "academic_year": { "type": "string" },
+        "file_name": { "type": "string" },
+        "file_type": { "type": "string" },
+        "file_size": { "type": "number" },
+        "created_at": { "type": "string" }
+      },
+      "required": ["id", "establishment_id", "title", "subject_name", "class_name", "academic_year", "file_name"]
+    },
+    "exam_configuration": {
+      "title": "ExamConfiguration",
+      "description": "Configuration of official examination requirements and deadlines (BEPC, BAC).",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "establishment_id": { "type": "string" },
+        "academic_year": { "type": "string" },
+        "exam_type": { "type": "string" },
+        "exam_name": { "type": "string" },
+        "deadline": { "type": "string" },
+        "required_documents": { "type": "string" },
+        "created_at": { "type": "string" }
+      },
+      "required": ["id", "establishment_id", "academic_year", "exam_type", "deadline"]
+    },
+    "exam_candidate": {
+      "title": "ExamCandidate",
+      "description": "Student candidate dossier for official exams (BEPC, BAC) with document checklist.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "establishment_id": { "type": "string" },
+        "academic_year": { "type": "string" },
+        "exam_type": { "type": "string" },
+        "student_id": { "type": "string" },
+        "class_id": { "type": "string" },
+        "status": { "type": "string" },
+        "documents_received_count": { "type": "number" },
+        "documents_total_count": { "type": "number" },
+        "created_at": { "type": "string" }
+      },
+      "required": ["id", "establishment_id", "academic_year", "exam_type", "student_id", "status"]
+    },
+    "document_template": {
+      "title": "DocumentTemplate",
+      "description": "Customizable visual document template per establishment (bulletin, quittance).",
+      "type": "object",
+      "properties": {
+        "docType": { "type": "string" },
+        "modelId": { "type": "string" },
+        "schoolInfo": { "type": "object" },
+        "styling": { "type": "object" },
+        "headerText": { "type": "string" },
+        "footerText": { "type": "string" },
+        "signatory": { "type": "object" },
+        "toggles": { "type": "object" },
+        "version": { "type": "number" },
+        "updatedAt": { "type": "string" },
+        "updatedBy": { "type": "string" }
+      },
+      "required": ["docType", "modelId", "schoolInfo", "styling", "signatory"]
     }
   },
   "firestore": {
+    "/establishments/{establishmentId}/document_templates/{docType}": {
+      "schema": "document_template",
+      "description": "Custom document template layouts and brand settings per establishment."
+    },
     "/establishments/{establishmentId}": {
       "schema": "establishment",
       "description": "Educational institutions registered on the platform."
@@ -280,6 +355,18 @@
     "/establishments/{establishmentId}/audit_logs/{auditId}": {
       "schema": "audit_log",
       "description": "Security audit records for an establishment."
+    },
+    "/establishments/{establishmentId}/curriculum_programs/{programId}": {
+      "schema": "curriculum_program",
+      "description": "Curriculum programs and textbooks attached to an establishment."
+    },
+    "/establishments/{establishmentId}/exam_configurations/{configId}": {
+      "schema": "exam_configuration",
+      "description": "Examination configurations and required documents for BEPC and BAC."
+    },
+    "/establishments/{establishmentId}/exam_candidates/{candidateId}": {
+      "schema": "exam_candidate",
+      "description": "Student candidate exam registration dossiers and document checklists."
     },
     "/subscriptions/{subscriptionId}": {
       "schema": "subscription",

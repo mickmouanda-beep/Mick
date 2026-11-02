@@ -12,18 +12,22 @@ import {
   CheckCircle2,
   X,
   Eye,
+  FileText,
   RotateCcw,
   Sparkles,
+  Database,
 } from 'lucide-react';
 import { api } from '../lib/api.ts';
 import { useAuth } from '../context/AuthContext.tsx';
 import { User, AuditLog, UserRole } from '../types.ts';
 import { ROLE_LABELS } from '../components/Navbar.tsx';
 import { SchoolLogoCapture } from '../components/SchoolLogoCapture.tsx';
+import { DataMaintenanceSection } from '../components/DataMaintenanceSection.tsx';
+import { DocumentSettingsTab } from '../components/documents/DocumentSettingsTab.tsx';
 
 export const AdministrationView: React.FC = () => {
   const { establishment, hasRole, user, refreshUser } = useAuth();
-  const [activeTab, setActiveTab] = useState<'users' | 'audit' | 'settings' | 'password'>('users');
+  const [activeTab, setActiveTab] = useState<'users' | 'audit' | 'settings' | 'documents' | 'password' | 'maintenance'>('users');
   const [usersList, setUsersList] = useState<User[]>([]);
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [loading, setLoading] = useState(true);
@@ -284,6 +288,18 @@ export const AdministrationView: React.FC = () => {
         )}
 
         <button
+          onClick={() => setActiveTab('documents')}
+          className={`px-4 py-2.5 border-b-2 transition flex items-center space-x-2 ${
+            activeTab === 'documents'
+              ? 'border-indigo-500 text-indigo-400 font-bold'
+              : 'border-transparent text-slate-400 hover:text-slate-200'
+          }`}
+        >
+          <FileText className="w-4 h-4" />
+          <span>Modèles de Documents</span>
+        </button>
+
+        <button
           onClick={() => setActiveTab('password')}
           className={`px-4 py-2.5 border-b-2 transition flex items-center space-x-2 ${
             activeTab === 'password'
@@ -294,6 +310,20 @@ export const AdministrationView: React.FC = () => {
           <KeyRound className="w-4 h-4" />
           <span>Mon Mot de Passe</span>
         </button>
+
+        {(isPromoteur || user?.role === 'ADMIN_GENERAL') && (
+          <button
+            onClick={() => setActiveTab('maintenance')}
+            className={`px-4 py-2.5 border-b-2 transition flex items-center space-x-2 ${
+              activeTab === 'maintenance'
+                ? 'border-indigo-500 text-indigo-400 font-bold'
+                : 'border-transparent text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <Database className="w-4 h-4" />
+            <span>Maintenance des données</span>
+          </button>
+        )}
       </div>
 
       {/* TAB 1: PERSONNEL & RÔLES */}
@@ -510,15 +540,29 @@ export const AdministrationView: React.FC = () => {
             />
           </div>
 
-          <div className="pt-2">
+          <div className="pt-2 flex flex-col sm:flex-row items-center justify-between gap-3">
             <button
               type="submit"
               className="px-5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl font-semibold shadow-md"
             >
               Mettre à Jour les Paramètres
             </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveTab('documents')}
+              className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-indigo-400 hover:text-indigo-300 border border-slate-700 rounded-xl text-xs font-semibold flex items-center space-x-1.5 transition cursor-pointer"
+            >
+              <FileText className="w-3.5 h-3.5" />
+              <span>Personnaliser les Modèles de Documents (Bulletins, Quittances) →</span>
+            </button>
           </div>
         </form>
+      )}
+
+      {/* TAB: MODÈLES DE DOCUMENTS PERSONNALISABLES */}
+      {activeTab === 'documents' && (
+        <DocumentSettingsTab />
       )}
 
       {/* TAB 4: MON MOT DE PASSE PERSONNEL */}
@@ -571,6 +615,11 @@ export const AdministrationView: React.FC = () => {
             </button>
           </div>
         </form>
+      )}
+
+      {/* TAB 5: MAINTENANCE DES DONNÉES */}
+      {activeTab === 'maintenance' && (
+        <DataMaintenanceSection />
       )}
 
       {/* MODAL CRÉER PERSONNEL */}

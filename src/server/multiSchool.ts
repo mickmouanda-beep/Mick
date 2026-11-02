@@ -1,7 +1,17 @@
 import { hashPassword, generateToken, logAudit, AuthUser } from './auth.ts';
-import { run, queryOne, queryAll, saveDb } from './db.ts';
 import { DeveloperStats } from '../types.ts';
-import { setEstablishment, setTenantUser } from './firestore_db.ts';
+import {
+  setEstablishment,
+  getEstablishment,
+  setTenantUser,
+  setSubscription,
+  getSubscription,
+  listEstablishments,
+  listDocs,
+  getDocData,
+  setDocData,
+  deleteDocData,
+} from './firestore_db.ts';
 
 export interface CreateSchoolInput {
   name: string;
@@ -15,15 +25,12 @@ export interface CreateSchoolInput {
   academic_year?: string;
   active_cycles?: string[];
   logo_url?: string;
-  // Code d'autorisation obligatoire fourni par le Développeur
   authorization_code?: string;
-  // Compte Administrateur de l'établissement : le Promoteur
   promoteurFullName?: string;
   promoteurUsername?: string;
   promoteurEmail?: string;
   promoteurPassword?: string;
   promoteurPhone?: string;
-  // Compatibilité ascendante
   directorFullName?: string;
   directorUsername?: string;
   directorEmail?: string;
@@ -36,7 +43,7 @@ export interface CreateSchoolInput {
  * Format standard : ECO-AUTH-XXXX-XXXX-XXXX
  */
 export function generateAuthCodeString(): string {
-  const chars = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ'; // Caractères lisibles (sans 0, O, 1, I)
+  const chars = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
   const segment = (len: number) => {
     let res = '';
     for (let i = 0; i < len; i++) {
@@ -50,17 +57,19 @@ export function generateAuthCodeString(): string {
 /**
  * Normalise et vérifie la disponibilité d'un code d'établissement (ex: ECO-001, CS-REN-BZV)
  */
-export function isSchoolCodeAvailable(code: string, excludeId?: string): boolean {
+export async function isSchoolCodeAvailable(code: string, excludeId?: string): Promise<boolean> {
   const cleanCode = code.trim().toUpperCase();
   if (!cleanCode) return false;
-  let sql = 'SELECT id FROM establishments WHERE UPPER(code) = UPPER(?)';
-  const params: any[] = [cleanCode];
-  if (excludeId) {
-    sql += ' AND id != ?';
-    params.push(excludeId);
+
+  try {
+    const fsEsts = await listEstablishments();
+    const existingFs = (fsEsts || []).find(
+      (e: any) => e.code && e.code.toUpperCase() === cleanCode && e.id !== excludeId
+    );
+    return !existingFs;
+  } catch {
+    return true;
   }
-  const existing = queryOne(sql, params);
-  return !existing;
 }
 
 /**
@@ -76,10 +85,8 @@ export async function verifyCreationAuthorizationCode(code: string): Promise<{
     return { valid: false, error: "Veuillez saisir un code d'autorisation." };
   }
 
-  const record = queryOne<any>(
-    'SELECT * FROM creation_authorizations WHERE UPPER(code) = UPPER(?)',
-    [cleanCode]
-  );
+  const allAuths = await listDocs<any>('creation_authorizations');
+  const record = (allAuths || []).find((a: any) => (a.code || '').toUpperCase() === cleanCode);
 
   if (!record) {
     return {
@@ -98,14 +105,14 @@ export async function verifyCreationAuthorizationCode(code: string): Promise<{
   if (record.status === 'REVOKED') {
     return {
       valid: false,
-      error: "Ce code d'autorisation a été révoqué par le développeur de la plateforme.",
+      error: "Ce code d'autorisation a été révoqué par le gestionnaire de la plateforme.",
     };
   }
 
   if (record.expires_at) {
     const expTime = new Date(record.expires_at).getTime();
     if (Date.now() > expTime) {
-      run('UPDATE creation_authorizations SET status = "EXPIRED" WHERE id = ?', [record.id]);
+      await setDocData('creation_authorizations', record.id, { ...record, status: 'EXPIRED' });
       return {
         valid: false,
         error: "Ce code d'autorisation est expiré. Veuillez solliciter un nouveau code auprès du développeur.",
@@ -150,10 +157,10 @@ export async function createAuthorizationCode(input: {
     throw new Error('Le nom complet du promoteur bénéficiaire est obligatoire.');
   }
 
+  const allAuths = await listDocs<any>('creation_authorizations');
   let code = generateAuthCodeString();
-  // S'assurer de l'unicité
   let attempts = 0;
-  while (queryOne('SELECT id FROM creation_authorizations WHERE code = ?', [code]) && attempts < 10) {
+  while ((allAuths || []).some((a: any) => a.code === code) && attempts < 10) {
     code = generateAuthCodeString();
     attempts++;
   }
@@ -167,25 +174,22 @@ export async function createAuthorizationCode(input: {
     expiresAt = d.toISOString();
   }
 
-  run(`
-    INSERT INTO creation_authorizations (
-      id, code, promoter_name, promoter_email, promoter_phone, notes, status,
-      created_by_user_id, created_by_name, created_at, expires_at
-    ) VALUES (?, ?, ?, ?, ?, ?, 'AVAILABLE', ?, ?, CURRENT_TIMESTAMP, ?)
-  `, [
+  const authDoc = {
     id,
     code,
-    input.promoter_name.trim(),
-    input.promoter_email?.trim() || null,
-    input.promoter_phone?.trim() || null,
-    input.notes?.trim() || null,
-    input.created_by_user_id || 'DEV-ADMIN',
-    input.created_by_name || 'Développeur Eco GES',
-    expiresAt,
-  ]);
+    promoter_name: input.promoter_name.trim(),
+    promoter_email: input.promoter_email?.trim() || null,
+    promoter_phone: input.promoter_phone?.trim() || null,
+    notes: input.notes?.trim() || null,
+    status: 'AVAILABLE',
+    created_by_user_id: input.created_by_user_id || 'DEV-ADMIN',
+    created_by_name: input.created_by_name || 'Développeur Eco GES',
+    created_at: new Date().toISOString(),
+    expires_at: expiresAt,
+  };
 
-  saveDb();
-  return queryOne('SELECT * FROM creation_authorizations WHERE id = ?', [id]);
+  await setDocData('creation_authorizations', id, authDoc);
+  return authDoc;
 }
 
 /**
@@ -196,7 +200,7 @@ export async function revokeAuthorizationCode(
   revokedBy: string,
   reason?: string
 ): Promise<any> {
-  const existing = queryOne<any>('SELECT * FROM creation_authorizations WHERE id = ?', [codeId]);
+  const existing = await getDocData<any>('creation_authorizations', codeId);
   if (!existing) {
     throw new Error("Code d'autorisation introuvable.");
   }
@@ -204,17 +208,16 @@ export async function revokeAuthorizationCode(
     throw new Error("Impossible de révoquer un code d'autorisation déjà consommé.");
   }
 
-  run(`
-    UPDATE creation_authorizations
-    SET status = 'REVOKED',
-        revoked_at = CURRENT_TIMESTAMP,
-        revoked_by = ?,
-        revocation_reason = ?
-    WHERE id = ?
-  `, [revokedBy, reason || 'Révocation manuelle par le développeur', codeId]);
+  const updated = {
+    ...existing,
+    status: 'REVOKED',
+    revoked_at: new Date().toISOString(),
+    revoked_by: revokedBy,
+    revocation_reason: reason || 'Révocation manuelle par le gestionnaire',
+  };
 
-  saveDb();
-  return queryOne('SELECT * FROM creation_authorizations WHERE id = ?', [codeId]);
+  await setDocData('creation_authorizations', codeId, updated);
+  return updated;
 }
 
 /**
@@ -226,17 +229,16 @@ export async function registerSchool(input: CreateSchoolInput): Promise<{
   user: AuthUser;
   establishment: any;
 }> {
-  const cleanCode = input.code.trim().toUpperCase();
+  const cleanCode = (input?.code || (input as any)?.school_code || '').trim().toUpperCase();
   if (!cleanCode) {
     throw new Error("Le code unique de l'établissement est obligatoire.");
   }
 
-  if (!isSchoolCodeAvailable(cleanCode)) {
+  if (!(await isSchoolCodeAvailable(cleanCode))) {
     throw new Error(`Le code d'établissement "${cleanCode}" est déjà utilisé par une autre école. Veuillez en choisir un autre.`);
   }
 
-  // 0. VÉRIFICATION STRICTE DU CODE D'AUTORISATION UNIQUE DU DÉVELOPPEUR
-  const authCodeRaw = (input.authorization_code || '').trim().toUpperCase();
+  const authCodeRaw = (input?.authorization_code || (input as any)?.authorizationCode || '').trim().toUpperCase();
   if (!authCodeRaw) {
     throw new Error("Un code d'autorisation unique Eco GES est obligatoire pour inscrire un établissement. Seul le Développeur de la plateforme peut vous délivrer ce code.");
   }
@@ -254,7 +256,6 @@ export async function registerSchool(input: CreateSchoolInput): Promise<{
     ? input.active_cycles
     : ['PRE_SCOLAIRE', 'PRIMAIRE', 'COLLEGE', 'LYCEE'];
 
-  // Compte Promoteur
   const promoteurFullName = (input.promoteurFullName || input.directorFullName || '').trim();
   const promoteurUsername = (input.promoteurUsername || input.directorUsername || '').trim().toLowerCase();
   const promoteurEmail = (input.promoteurEmail || input.directorEmail || '')?.trim() || null;
@@ -268,33 +269,6 @@ export async function registerSchool(input: CreateSchoolInput): Promise<{
   const promoteurId = `USR-PROM-${Date.now().toString(36).toUpperCase()}`;
   const passwordHash = await hashPassword(rawPassword);
 
-  // 1. Insertion de l'établissement (statut ACTIVE ou PENDING_ACTIVATION)
-  run(`
-    INSERT INTO establishments (
-      id, name, code, country, city, address, phone, email, motto, academic_year, currency, active_cycles, logo_url,
-      status, activated_at, auth_code_used, promoter_id, promoter_name, promoter_email, promoter_phone
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'FCFA', ?, ?, 'ACTIVE', CURRENT_TIMESTAMP, ?, ?, ?, ?, ?)
-  `, [
-    establishmentId,
-    input.name.trim(),
-    cleanCode,
-    country,
-    input.city.trim(),
-    input.address?.trim() || '',
-    input.phone?.trim() || '',
-    input.email?.trim() || '',
-    input.motto?.trim() || '',
-    academicYear,
-    JSON.stringify(activeCycles),
-    input.logo_url || null,
-    authCodeRaw || 'INSCRIPTION_DIRECTE',
-    promoteurId,
-    promoteurFullName,
-    promoteurEmail,
-    promoteurPhone,
-  ]);
-
-  // 2. Création de la licence et de l'abonnement commercial initial
   const formulaKey = ((input as any).formula || 'EXCELLENCE').toUpperCase();
   const formulaDefaults: Record<string, { name: string; max_students: number; max_staff: number }> = {
     EXCELLENCE: { name: 'Formule Excellence — Illimité', max_students: 1500, max_staff: 150 },
@@ -305,82 +279,77 @@ export async function registerSchool(input: CreateSchoolInput): Promise<{
   const subId = `SUB-${Date.now().toString(36).toUpperCase()}`;
   const licenseRef = `LIC-${new Date().getFullYear()}-${cleanCode}`;
 
-  run(`
-    INSERT INTO subscriptions (
-      id, establishment_id, plan_name, formula, formula_name, license_ref,
-      status, max_students, max_users, duration_months, activated_at, expires_at
-    )
-    VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, 12, CURRENT_TIMESTAMP, date('now', '+1 year'))
-  `, [
-    subId,
-    establishmentId,
-    formulaKey,
-    formulaKey,
-    chosenFormula.name,
-    licenseRef,
-    chosenFormula.max_students,
-    chosenFormula.max_staff,
-  ]);
+  // 1. Enregistrement de l'établissement dans Firestore
+  await setEstablishment(establishmentId, {
+    id: establishmentId,
+    name: input.name.trim(),
+    code: cleanCode,
+    country,
+    city: input.city.trim(),
+    address: input.address?.trim() || '',
+    phone: input.phone?.trim() || '',
+    email: input.email?.trim() || '',
+    motto: input.motto?.trim() || '',
+    academic_year: academicYear,
+    currency: 'FCFA',
+    active_cycles: activeCycles,
+    logo_url: input.logo_url || null,
+    status: 'ACTIVE',
+    auth_code_used: authCodeRaw,
+    promoter_id: promoteurId,
+    promoter_name: promoteurFullName,
+    promoter_email: promoteurEmail,
+    promoter_phone: promoteurPhone,
+    created_at: new Date().toISOString(),
+  });
 
-  // 3. Création du compte du Promoteur
-  run(`
-    INSERT INTO users (
-      id, establishment_id, username, email, password_hash, full_name, phone, role, status
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'PROMOTEUR', 'ACTIVE')
-  `, [
-    promoteurId,
-    establishmentId,
-    promoteurUsername,
-    promoteurEmail,
-    passwordHash,
-    promoteurFullName,
-    promoteurPhone,
-  ]);
+  // 2. Compte Promoteur dans Firestore
+  const authUser: AuthUser = {
+    id: promoteurId,
+    establishment_id: establishmentId,
+    username: promoteurUsername,
+    email: promoteurEmail,
+    full_name: promoteurFullName,
+    role: 'PROMOTEUR',
+    status: 'ACTIVE',
+  };
 
-  // 4. Consommation DÉFINITIVE et ATOMIQUE du code d'autorisation unique
-  run(`
-    UPDATE creation_authorizations
-    SET status = 'USED',
-        used_at = CURRENT_TIMESTAMP,
-        used_by_user_id = ?,
-        used_by_username = ?,
-        created_establishment_id = ?,
-        created_establishment_name = ?
-    WHERE id = ? AND status = 'AVAILABLE'
-  `, [
-    promoteurId,
-    promoteurUsername,
-    establishmentId,
-    input.name.trim(),
-    authRecord.id,
-  ]);
+  await setTenantUser(establishmentId, {
+    ...authUser,
+    password_hash: passwordHash,
+    phone: promoteurPhone,
+    created_at: new Date().toISOString(),
+  });
 
-  const verifyConsumed = queryOne<any>('SELECT status FROM creation_authorizations WHERE id = ?', [authRecord.id]);
-  if (verifyConsumed?.status !== 'USED') {
-    throw new Error("Conflit de sécurité : ce code d'autorisation a été consommé simultanément par une autre requête.");
-  }
+  // 3. Licence commerciale dans Firestore
+  await setSubscription(establishmentId, {
+    id: subId,
+    establishment_id: establishmentId,
+    plan_name: formulaKey,
+    formula: formulaKey,
+    formula_name: chosenFormula.name,
+    license_ref: licenseRef,
+    status: 'ACTIVE',
+    max_students: chosenFormula.max_students,
+    max_users: chosenFormula.max_staff,
+    duration_months: 12,
+    activated_at: new Date().toISOString(),
+    expires_at: new Date(Date.now() + 365 * 24 * 3600 * 1000).toISOString(),
+    renewal_count: 0,
+  });
 
-  // 5. Initialisation des matières de base selon les cycles activés
-  const baseSubjects = [
-    { code: 'FRAN', name: 'Français & Expression', cycle: 'COLLEGE', coef: 4 },
-    { code: 'MATH', name: 'Mathématiques', cycle: 'COLLEGE', coef: 4 },
-    { code: 'PC', name: 'Physique-Chimie', cycle: 'COLLEGE', coef: 2 },
-    { code: 'SVT', name: 'Sciences de la Vie et de la Terre', cycle: 'COLLEGE', coef: 2 },
-    { code: 'ANG', name: 'Anglais', cycle: 'COLLEGE', coef: 2 },
-    { code: 'HIST', name: 'Histoire-Géographie', cycle: 'COLLEGE', coef: 2 },
-    { code: 'EPS', name: 'Éducation Physique et Sportive', cycle: 'COLLEGE', coef: 1 },
-  ];
+  // 4. Consommation du code d'autorisation dans Firestore
+  await setDocData('creation_authorizations', authRecord.id, {
+    ...authRecord,
+    status: 'USED',
+    used_at: new Date().toISOString(),
+    used_by_user_id: promoteurId,
+    used_by_username: promoteurUsername,
+    created_establishment_id: establishmentId,
+    created_establishment_name: input.name.trim(),
+  });
 
-  for (const sub of baseSubjects) {
-    if (activeCycles.includes(sub.cycle)) {
-      run(`
-        INSERT INTO subjects (id, establishment_id, code, name, cycle_code, default_coefficient)
-        VALUES (?, ?, ?, ?, ?, ?)
-      `, [`SUB-${cleanCode}-${sub.code}`, establishmentId, sub.code, sub.name, sub.cycle, sub.coef]);
-    }
-  }
-
-  // 6. Journal d'audit avec référence au code consommé
+  // 5. Journal d'audit
   logAudit(
     establishmentId,
     promoteurId,
@@ -396,57 +365,6 @@ export async function registerSchool(input: CreateSchoolInput): Promise<{
       ville: input.city,
     }
   );
-
-  saveDb();
-
-  try {
-    await setEstablishment(establishmentId, {
-      id: establishmentId,
-      name: input.name.trim(),
-      code: cleanCode,
-      country,
-      city: input.city.trim(),
-      address: input.address?.trim() || '',
-      phone: input.phone?.trim() || '',
-      email: input.email?.trim() || '',
-      motto: input.motto?.trim() || '',
-      academic_year: academicYear,
-      currency: 'FCFA',
-      active_cycles: activeCycles,
-      logo_url: input.logo_url || null,
-      status: 'ACTIVE',
-      auth_code_used: authCodeRaw,
-      promoter_id: promoteurId,
-      promoter_name: promoteurFullName,
-      promoter_email: promoteurEmail,
-      promoter_phone: promoteurPhone,
-      created_at: new Date().toISOString(),
-    });
-    await setTenantUser(establishmentId, {
-      id: promoteurId,
-      establishment_id: establishmentId,
-      username: promoteurUsername,
-      email: promoteurEmail,
-      password_hash: passwordHash,
-      full_name: promoteurFullName,
-      phone: promoteurPhone,
-      role: 'PROMOTEUR',
-      status: 'ACTIVE',
-      created_at: new Date().toISOString(),
-    });
-  } catch (fsErr) {
-    console.warn('Persistance Cloud Firestore établissement (registerSchool) asynchrone:', fsErr);
-  }
-
-  const authUser: AuthUser = {
-    id: promoteurId,
-    establishment_id: establishmentId,
-    username: promoteurUsername,
-    email: promoteurEmail,
-    full_name: promoteurFullName,
-    role: 'PROMOTEUR',
-    status: 'ACTIVE',
-  };
 
   const token = generateToken(authUser);
 
@@ -475,7 +393,6 @@ export async function registerSchool(input: CreateSchoolInput): Promise<{
 
 /**
  * Création directe d'un établissement scolaire par le Gestionnaire d'application (ADMIN_GENERAL).
- * Ne requiert pas de code d'autorisation préalable (action souveraine de l'administration centrale).
  */
 export async function registerSchoolDirectAdmin(input: any, adminUserId: string, adminName: string): Promise<any> {
   const cleanCode = (input.code || '').trim().toUpperCase();
@@ -483,7 +400,7 @@ export async function registerSchoolDirectAdmin(input: any, adminUserId: string,
     throw new Error("Le code unique de l'établissement est obligatoire.");
   }
 
-  if (!isSchoolCodeAvailable(cleanCode)) {
+  if (!(await isSchoolCodeAvailable(cleanCode))) {
     throw new Error(`Le code d'établissement "${cleanCode}" est déjà utilisé par une autre école. Veuillez en choisir un autre.`);
   }
 
@@ -494,7 +411,6 @@ export async function registerSchoolDirectAdmin(input: any, adminUserId: string,
     ? input.active_cycles
     : ['PRE_SCOLAIRE', 'PRIMAIRE', 'COLLEGE', 'LYCEE'];
 
-  // Compte Promoteur
   const promoteurFullName = (input.promoteurFullName || input.directorFullName || '').trim();
   const promoteurUsername = (input.promoteurUsername || input.directorUsername || '').trim().toLowerCase();
   const promoteurEmail = (input.promoteurEmail || input.directorEmail || '')?.trim() || null;
@@ -508,32 +424,6 @@ export async function registerSchoolDirectAdmin(input: any, adminUserId: string,
   const promoteurId = `USR-PROM-${Date.now().toString(36).toUpperCase()}`;
   const passwordHash = await hashPassword(rawPassword);
 
-  // 1. Insertion de l'établissement
-  run(`
-    INSERT INTO establishments (
-      id, name, code, country, city, address, phone, email, motto, academic_year, currency, active_cycles, logo_url,
-      status, activated_at, auth_code_used, promoter_id, promoter_name, promoter_email, promoter_phone
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'FCFA', ?, ?, 'ACTIVE', CURRENT_TIMESTAMP, 'CREATION_DIRECTE_GESTIONNAIRE', ?, ?, ?, ?)
-  `, [
-    establishmentId,
-    input.name.trim(),
-    cleanCode,
-    country,
-    input.city.trim(),
-    input.address?.trim() || '',
-    input.phone?.trim() || '',
-    input.email?.trim() || '',
-    input.motto?.trim() || '',
-    academicYear,
-    JSON.stringify(activeCycles),
-    input.logo_url || null,
-    promoteurId,
-    promoteurFullName,
-    promoteurEmail,
-    promoteurPhone,
-  ]);
-
-  // 2. Création de la licence et de l'abonnement commercial
   const formulaKey = ((input as any).formula || 'EXCELLENCE').toUpperCase();
   const formulaDefaults: Record<string, { name: string; max_students: number; max_staff: number }> = {
     EXCELLENCE: { name: 'Formule Excellence — Illimité', max_students: 1500, max_staff: 150 },
@@ -544,57 +434,58 @@ export async function registerSchoolDirectAdmin(input: any, adminUserId: string,
   const subId = `SUB-${Date.now().toString(36).toUpperCase()}`;
   const licenseRef = `LIC-${new Date().getFullYear()}-${cleanCode}`;
 
-  run(`
-    INSERT INTO subscriptions (
-      id, establishment_id, plan_name, formula, formula_name, license_ref,
-      status, max_students, max_users, duration_months, activated_at, expires_at
-    )
-    VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, 12, CURRENT_TIMESTAMP, date('now', '+1 year'))
-  `, [
-    subId,
-    establishmentId,
-    formulaKey,
-    formulaKey,
-    chosenFormula.name,
-    licenseRef,
-    chosenFormula.max_students,
-    chosenFormula.max_staff,
-  ]);
+  await setEstablishment(establishmentId, {
+    id: establishmentId,
+    name: input.name.trim(),
+    code: cleanCode,
+    country,
+    city: input.city.trim(),
+    address: input.address?.trim() || '',
+    phone: input.phone?.trim() || '',
+    email: input.email?.trim() || '',
+    motto: input.motto?.trim() || '',
+    academic_year: academicYear,
+    currency: 'FCFA',
+    active_cycles: activeCycles,
+    logo_url: input.logo_url || null,
+    status: 'ACTIVE',
+    auth_code_used: 'CREATION_DIRECTE_GESTIONNAIRE',
+    promoter_id: promoteurId,
+    promoter_name: promoteurFullName,
+    promoter_email: promoteurEmail,
+    promoter_phone: promoteurPhone,
+    created_at: new Date().toISOString(),
+  });
 
-  // 3. Création du compte du Promoteur
-  run(`
-    INSERT INTO users (
-      id, establishment_id, username, email, password_hash, full_name, phone, role, status
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'PROMOTEUR', 'ACTIVE')
-  `, [
-    promoteurId,
-    establishmentId,
-    promoteurUsername,
-    promoteurEmail,
-    passwordHash,
-    promoteurFullName,
-    promoteurPhone,
-  ]);
+  await setTenantUser(establishmentId, {
+    id: promoteurId,
+    establishment_id: establishmentId,
+    username: promoteurUsername,
+    email: promoteurEmail,
+    password_hash: passwordHash,
+    full_name: promoteurFullName,
+    phone: promoteurPhone,
+    role: 'PROMOTEUR',
+    status: 'ACTIVE',
+    created_at: new Date().toISOString(),
+  });
 
-  // 4. Initialisation des matières selon les cycles activés
-  const baseCollege = [
-    { code: 'FRAN', name: 'Français & Expression', cycle: 'COLLEGE', coef: 4 },
-    { code: 'MATH', name: 'Mathématiques', cycle: 'COLLEGE', coef: 4 },
-    { code: 'PC', name: 'Physique-Chimie', cycle: 'COLLEGE', coef: 2 },
-    { code: 'SVT', name: 'Sciences de la Vie et de la Terre', cycle: 'COLLEGE', coef: 2 },
-    { code: 'ANG', name: 'Anglais', cycle: 'COLLEGE', coef: 2 },
-    { code: 'HIST', name: 'Histoire-Géographie', cycle: 'COLLEGE', coef: 2 },
-    { code: 'EPS', name: 'Éducation Physique et Sportive', cycle: 'COLLEGE', coef: 1 },
-  ];
+  await setSubscription(establishmentId, {
+    id: subId,
+    establishment_id: establishmentId,
+    plan_name: formulaKey,
+    formula: formulaKey,
+    formula_name: chosenFormula.name,
+    license_ref: licenseRef,
+    status: 'ACTIVE',
+    max_students: chosenFormula.max_students,
+    max_users: chosenFormula.max_staff,
+    duration_months: 12,
+    activated_at: new Date().toISOString(),
+    expires_at: new Date(Date.now() + 365 * 24 * 3600 * 1000).toISOString(),
+    renewal_count: 0,
+  });
 
-  for (const sub of baseCollege) {
-    run(`
-      INSERT OR IGNORE INTO subjects (id, establishment_id, code, name, cycle_code, default_coefficient)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `, [`SUB-${cleanCode}-${sub.code}`, establishmentId, sub.code, sub.name, sub.cycle, sub.coef]);
-  }
-
-  // 5. Journal d'audit central
   logAudit(
     establishmentId,
     adminUserId,
@@ -611,47 +502,6 @@ export async function registerSchoolDirectAdmin(input: any, adminUserId: string,
     }
   );
 
-  saveDb();
-
-  try {
-    await setEstablishment(establishmentId, {
-      id: establishmentId,
-      name: input.name.trim(),
-      code: cleanCode,
-      country,
-      city: input.city.trim(),
-      address: input.address?.trim() || '',
-      phone: input.phone?.trim() || '',
-      email: input.email?.trim() || '',
-      motto: input.motto?.trim() || '',
-      academic_year: academicYear,
-      currency: 'FCFA',
-      active_cycles: activeCycles,
-      logo_url: input.logo_url || null,
-      status: 'ACTIVE',
-      auth_code_used: 'CREATION_DIRECTE_GESTIONNAIRE',
-      promoter_id: promoteurId,
-      promoter_name: promoteurFullName,
-      promoter_email: promoteurEmail,
-      promoter_phone: promoteurPhone,
-      created_at: new Date().toISOString(),
-    });
-    await setTenantUser(establishmentId, {
-      id: promoteurId,
-      establishment_id: establishmentId,
-      username: promoteurUsername,
-      email: promoteurEmail,
-      password_hash: passwordHash,
-      full_name: promoteurFullName,
-      phone: promoteurPhone,
-      role: 'PROMOTEUR',
-      status: 'ACTIVE',
-      created_at: new Date().toISOString(),
-    });
-  } catch (fsErr) {
-    console.warn('Persistance Cloud Firestore établissement (registerSchoolDirectAdmin) asynchrone:', fsErr);
-  }
-
   return {
     id: establishmentId,
     name: input.name.trim(),
@@ -666,205 +516,212 @@ export async function registerSchoolDirectAdmin(input: any, adminUserId: string,
 }
 
 /**
- * Statistiques globales du tableau de bord développeur (calculées à partir des données réelles)
+ * Statistiques globales du tableau de bord développeur (calculées à partir des données Firestore réelles)
  */
-export function getDeveloperMetrics(): DeveloperStats {
-  const totalEsts = queryOne<any>('SELECT COUNT(*) as count FROM establishments WHERE code != "ECO-HQ"') || { count: 0 };
-  const activeEsts = queryOne<any>('SELECT COUNT(*) as count FROM establishments WHERE code != "ECO-HQ" AND (status IS NULL OR status = "ACTIVE")') || { count: 0 };
-  const pendingEsts = queryOne<any>('SELECT COUNT(*) as count FROM establishments WHERE status = "PENDING_ACTIVATION"') || { count: 0 };
-  const suspendedEsts = queryOne<any>('SELECT COUNT(*) as count FROM establishments WHERE status = "SUSPENDED"') || { count: 0 };
+export async function getDeveloperMetrics(): Promise<DeveloperStats> {
+  const allEsts = await listEstablishments();
+  const allSubs = await listDocs('subscriptions');
+  const allAuths = await listDocs('creation_authorizations');
+  const allUsers = await listDocs('users');
 
-  const totalCodes = queryOne<any>('SELECT COUNT(*) as count FROM creation_authorizations') || { count: 0 };
-  const availableCodes = queryOne<any>('SELECT COUNT(*) as count FROM creation_authorizations WHERE status = "AVAILABLE"') || { count: 0 };
-  const usedCodes = queryOne<any>('SELECT COUNT(*) as count FROM creation_authorizations WHERE status = "USED"') || { count: 0 };
-  const expiredOrRevoked = queryOne<any>('SELECT COUNT(*) as count FROM creation_authorizations WHERE status IN ("EXPIRED", "REVOKED")') || { count: 0 };
+  const activeEsts = (allEsts || []).filter(e => e.code !== 'ECO-HQ' && (!e.status || e.status === 'ACTIVE'));
+  const pendingEsts = (allEsts || []).filter(e => e.status === 'PENDING_ACTIVATION');
+  const suspendedEsts = (allEsts || []).filter(e => e.status === 'SUSPENDED');
 
-  const totalPromoters = queryOne<any>('SELECT COUNT(DISTINCT id) as count FROM users WHERE role = "PROMOTEUR"') || { count: 0 };
+  const activeCodes = (allAuths || []).filter(a => a.status === 'AVAILABLE');
+  const usedCodes = (allAuths || []).filter(a => a.status === 'USED');
+  const expiredOrRevoked = (allAuths || []).filter(a => ['EXPIRED', 'REVOKED'].includes(a.status));
 
-  // Licences réelles
-  const activeLicenses = queryOne<any>(`
-    SELECT COUNT(*) as count FROM subscriptions s
-    JOIN establishments e ON s.establishment_id = e.id
-    WHERE e.code != "ECO-HQ" AND (s.status = "ACTIVE" OR s.status IS NULL)
-  `) || { count: 0 };
+  const promoters = (allUsers || []).filter(u => u.role === 'PROMOTEUR');
 
-  const expiredLicenses = queryOne<any>(`
-    SELECT COUNT(*) as count FROM subscriptions s
-    JOIN establishments e ON s.establishment_id = e.id
-    WHERE e.code != "ECO-HQ" AND (s.expires_at <= date('now', '+30 days') OR s.status = 'SUSPENDED')
-  `) || { count: 0 };
+  const activeLicenses = (allSubs || []).filter(s => {
+    const est = (allEsts || []).find(e => e.id === s.establishment_id);
+    return est && est.code !== 'ECO-HQ' && (s.status === 'ACTIVE' || !s.status);
+  });
 
-  const distExcellence = queryOne<any>(`
-    SELECT COUNT(*) as count FROM subscriptions s
-    JOIN establishments e ON s.establishment_id = e.id
-    WHERE e.code != "ECO-HQ" AND (s.formula = 'EXCELLENCE' OR s.plan_name = 'EXCELLENCE' OR s.plan_name = 'STANDARD')
-  `) || { count: 0 };
+  const expiredLicenses = (allSubs || []).filter(s => {
+    const est = (allEsts || []).find(e => e.id === s.establishment_id);
+    const expiresDate = new Date(s.expires_at || 0);
+    const soon = new Date();
+    soon.setDate(soon.getDate() + 30);
+    return est && est.code !== 'ECO-HQ' && (expiresDate <= soon || s.status === 'SUSPENDED');
+  });
 
-  const distMoyen = queryOne<any>(`
-    SELECT COUNT(*) as count FROM subscriptions s
-    JOIN establishments e ON s.establishment_id = e.id
-    WHERE e.code != "ECO-HQ" AND (s.formula = 'PACK_MOYEN' OR s.plan_name = 'PACK_MOYEN')
-  `) || { count: 0 };
+  const distExcellence = (allSubs || []).filter(s => {
+    const est = (allEsts || []).find(e => e.id === s.establishment_id);
+    return est && est.code !== 'ECO-HQ' && (['EXCELLENCE', 'STANDARD'].includes(s.formula || s.plan_name || ''));
+  });
 
-  const distStart = queryOne<any>(`
-    SELECT COUNT(*) as count FROM subscriptions s
-    JOIN establishments e ON s.establishment_id = e.id
-    WHERE e.code != "ECO-HQ" AND (s.formula = 'START' OR s.plan_name = 'START' OR s.plan_name = 'STARTER')
-  `) || { count: 0 };
+  const distMoyen = (allSubs || []).filter(s => {
+    const est = (allEsts || []).find(e => e.id === s.establishment_id);
+    return est && est.code !== 'ECO-HQ' && (['PACK_MOYEN'].includes(s.formula || s.plan_name || ''));
+  });
+
+  const distStart = (allSubs || []).filter(s => {
+    const est = (allEsts || []).find(e => e.id === s.establishment_id);
+    return est && est.code !== 'ECO-HQ' && (['START', 'STARTER'].includes(s.formula || s.plan_name || ''));
+  });
 
   return {
-    totalEstablishments: totalEsts.count,
-    activeEstablishments: activeEsts.count,
-    pendingEstablishments: pendingEsts.count,
-    suspendedEstablishments: suspendedEsts.count,
-    totalCodes: totalCodes.count,
-    availableCodes: availableCodes.count,
-    usedCodes: usedCodes.count,
-    expiredOrRevokedCodes: expiredOrRevoked.count,
-    totalPromoters: totalPromoters.count,
-    activeLicenses: activeLicenses.count,
-    expiredOrExpiringLicenses: expiredLicenses.count,
+    totalEstablishments: (allEsts || []).filter(e => e.code !== 'ECO-HQ').length,
+    activeEstablishments: activeEsts.length,
+    pendingEstablishments: pendingEsts.length,
+    suspendedEstablishments: suspendedEsts.length,
+    totalCodes: (allAuths || []).length,
+    availableCodes: activeCodes.length,
+    usedCodes: usedCodes.length,
+    expiredOrRevokedCodes: expiredOrRevoked.length,
+    totalPromoters: promoters.length,
+    activeLicenses: activeLicenses.length,
+    expiredOrExpiringLicenses: expiredLicenses.length,
     formulaDistribution: {
-      excellence: distExcellence.count,
-      packMoyen: distMoyen.count,
-      start: distStart.count,
+      excellence: distExcellence.length,
+      packMoyen: distMoyen.length,
+      start: distStart.length,
     },
   };
 }
 
 /**
- * Récupère tous les établissements pour la console Développeur avec détails opérationnels
+ * Récupère tous les établissements pour la console Développeur avec détails opérationnels depuis Firestore
  */
-export function getDeveloperEstablishments(filters?: {
+export async function getDeveloperEstablishments(filters?: {
   search?: string;
   status?: string;
   city?: string;
-}): any[] {
-  let sql = `
-    SELECT 
-      e.id, e.name, e.code, e.city, e.address, e.country, e.phone, e.email, e.motto,
-      e.academic_year, e.currency, e.active_cycles, e.logo_url, e.created_at,
-      COALESCE(e.status, 'ACTIVE') as status,
-      e.activated_at, e.suspended_at, e.suspension_reason, e.suspended_by,
-      e.deleted_at, e.deletion_reason, e.auth_code_used,
-      e.promoter_name, e.promoter_email, e.promoter_phone,
-      (SELECT COUNT(*) FROM students s WHERE s.establishment_id = e.id) as student_count,
-      (SELECT COUNT(*) FROM users u WHERE u.establishment_id = e.id AND u.role NOT IN ('ELEVE', 'PARENT')) as staff_count,
-      (SELECT COUNT(*) FROM users u WHERE u.establishment_id = e.id) as user_count,
-      COALESCE(sub.formula, sub.plan_name, 'EXCELLENCE') as formula,
-      COALESCE(sub.formula_name, 'Formule Excellence — Illimité') as formula_name,
-      COALESCE(sub.license_ref, 'LIC-2026-' || e.code) as license_ref,
-      COALESCE(sub.max_students, 1500) as max_students,
-      COALESCE(sub.max_users, 150) as max_staff,
-      COALESCE(sub.status, 'ACTIVE') as subscription_status,
-      sub.expires_at as subscription_expires_at,
-      sub.activated_at as subscription_activated_at,
-      COALESCE(sub.renewal_count, 0) as renewal_count
-    FROM establishments e
-    LEFT JOIN subscriptions sub ON sub.establishment_id = e.id
-    WHERE e.code != 'ECO-HQ'
-  `;
+}): Promise<any[]> {
+  const allEsts = await listEstablishments();
+  const allSubs = await listDocs('subscriptions');
+  const allUsers = await listDocs('users');
 
-  const params: any[] = [];
-
-  if (filters?.search) {
-    const q = `%${filters.search.trim().toLowerCase()}%`;
-    sql += ` AND (LOWER(e.name) LIKE ? OR LOWER(e.code) LIKE ? OR LOWER(e.city) LIKE ? OR LOWER(COALESCE(e.promoter_name, '')) LIKE ?)`;
-    params.push(q, q, q, q);
-  }
-
-  if (filters?.status && filters.status !== 'ALL') {
-    sql += ` AND COALESCE(e.status, 'ACTIVE') = ?`;
-    params.push(filters.status);
-  }
-
-  if (filters?.city && filters.city !== 'ALL') {
-    sql += ` AND LOWER(e.city) = LOWER(?)`;
-    params.push(filters.city);
-  }
-
-  sql += ` ORDER BY e.created_at DESC`;
-
-  return queryAll(sql, params).map((est) => {
+  const filtered = (allEsts || []).filter(e => e.code !== 'ECO-HQ').map((est: any) => {
+    let activeCycles = [];
     try {
-      est.active_cycles = JSON.parse(est.active_cycles);
+      activeCycles = typeof est.active_cycles === 'string' ? JSON.parse(est.active_cycles) : (est.active_cycles || []);
     } catch {
-      est.active_cycles = [];
+      activeCycles = [];
     }
-    return est;
+
+    const sub = (allSubs || []).find((s: any) => s.establishment_id === est.id);
+    const estUsers = (allUsers || []).filter((u: any) => u.establishment_id === est.id);
+    const staffCount = estUsers.filter((u: any) => !['ELEVE', 'PARENT'].includes(u.role)).length;
+
+    return {
+      ...est,
+      active_cycles: activeCycles,
+      status: est.status || 'ACTIVE',
+      student_count: est.student_count || 0,
+      staff_count: staffCount,
+      user_count: estUsers.length,
+      formula: sub?.formula || sub?.plan_name || 'EXCELLENCE',
+      formula_name: sub?.formula_name || 'Formule Excellence — Illimité',
+      license_ref: sub?.license_ref || `LIC-2026-${est.code}`,
+      max_students: sub?.max_students || 1500,
+      max_staff: sub?.max_users || 150,
+      subscription_status: sub?.status || 'ACTIVE',
+      subscription_expires_at: sub?.expires_at,
+      subscription_activated_at: sub?.activated_at || est.created_at,
+      renewal_count: sub?.renewal_count || 0,
+    };
   });
+
+  return filtered.filter(e => {
+    if (filters?.search) {
+      const q = filters.search.trim().toLowerCase();
+      const match = (e.name || '').toLowerCase().includes(q) ||
+                    (e.code || '').toLowerCase().includes(q) ||
+                    (e.city || '').toLowerCase().includes(q) ||
+                    (e.promoter_name || '').toLowerCase().includes(q);
+      if (!match) return false;
+    }
+    if (filters?.status && filters.status !== 'ALL') {
+      if ((e.status || 'ACTIVE') !== filters.status) return false;
+    }
+    if (filters?.city && filters.city !== 'ALL') {
+      if ((e.city || '').toLowerCase() !== filters.city.toLowerCase()) return false;
+    }
+    return true;
+  }).sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
 }
 
 /**
  * Récupère la liste complète des licences pour la rubrique « Gestion des licences »
  */
-export function getDeveloperLicenses(): any[] {
-  const sql = `
-    SELECT 
-      e.id as establishment_id,
-      e.name as establishment_name,
-      e.code as establishment_code,
-      e.city,
-      e.country,
-      e.logo_url,
-      e.promoter_name,
-      sub.id as subscription_id,
-      COALESCE(sub.license_ref, 'LIC-2026-' || e.code) as license_ref,
-      COALESCE(sub.formula, sub.plan_name, 'EXCELLENCE') as formula,
-      COALESCE(sub.formula_name, 'Formule Excellence — Illimité') as formula_name,
-      COALESCE(sub.status, 'ACTIVE') as status,
-      COALESCE(sub.max_students, 1500) as max_students,
-      (SELECT COUNT(*) FROM students s WHERE s.establishment_id = e.id) as current_students,
-      COALESCE(sub.max_users, 150) as max_staff,
-      (SELECT COUNT(*) FROM users u WHERE u.establishment_id = e.id AND u.role NOT IN ('ELEVE', 'PARENT')) as current_staff,
-      COALESCE(sub.activated_at, e.created_at) as activated_at,
-      sub.expires_at,
-      COALESCE(sub.renewal_count, 0) as renewal_count
-    FROM establishments e
-    LEFT JOIN subscriptions sub ON sub.establishment_id = e.id
-    WHERE e.code != 'ECO-HQ'
-    ORDER BY e.created_at DESC
-  `;
+export async function getDeveloperLicenses(): Promise<any[]> {
+  const allEsts = await listEstablishments();
+  const allSubs = await listDocs('subscriptions');
 
-  return queryAll(sql).map((lic) => {
+  const licenses = (allSubs || []).map((sub) => {
+    const est = (allEsts || []).find(e => e.id === sub.establishment_id);
+    if (!est) return null;
+
+    return {
+      establishment_id: est.id,
+      establishment_name: est.name,
+      establishment_code: est.code,
+      city: est.city,
+      country: est.country,
+      logo_url: est.logo_url,
+      promoter_name: est.promoter_name,
+      subscription_id: sub.id,
+      license_ref: sub.license_ref || `LIC-2026-${est.code}`,
+      formula: sub.formula || sub.plan_name || 'EXCELLENCE',
+      formula_name: sub.formula_name || 'Formule Excellence — Illimité',
+      status: sub.status || 'ACTIVE',
+      max_students: sub.max_students || 1500,
+      max_staff: sub.max_users || 150,
+      activated_at: sub.activated_at || est.created_at,
+      expires_at: sub.expires_at,
+      renewal_count: sub.renewal_count || 0,
+    };
+  }).filter(l => l !== null);
+
+  return licenses.map((lic: any) => {
     const expiresMs = lic.expires_at ? new Date(lic.expires_at).getTime() : Date.now() + 365 * 86400000;
     const nowMs = Date.now();
     const daysRemaining = Math.ceil((expiresMs - nowMs) / (1000 * 60 * 60 * 24));
     const isExpired = daysRemaining <= 0;
-    const studentPercent = Math.min(100, Math.round(((lic.current_students || 0) / (lic.max_students || 1)) * 100));
-    const staffPercent = Math.min(100, Math.round(((lic.current_staff || 0) / (lic.max_staff || 1)) * 100));
 
     return {
       ...lic,
       days_remaining: daysRemaining,
       is_expired: isExpired,
-      student_quota_percent: studentPercent,
-      staff_quota_percent: staffPercent,
+      student_quota_percent: 0,
+      staff_quota_percent: 0,
     };
   });
 }
 
 /**
- * Renouvelle la licence d'un établissement
+ * Renouvelle la licence d'un établissement dans Firestore
  */
-export function renewEstablishmentLicense(
+export async function renewEstablishmentLicense(
   establishmentId: string,
   durationMonths: number = 12,
   operatorName = "Gestionnaire d'application",
   notes?: string
-): any {
-  let sub = queryOne<any>('SELECT * FROM subscriptions WHERE establishment_id = ?', [establishmentId]);
+): Promise<any> {
+  let sub = await getSubscription(establishmentId);
+  const est = await getEstablishment(establishmentId);
   if (!sub) {
-    const est = queryOne<any>('SELECT code FROM establishments WHERE id = ?', [establishmentId]);
     const subId = `SUB-${Date.now().toString(36).toUpperCase()}`;
     const licRef = `LIC-${new Date().getFullYear()}-${est?.code || 'GEN'}`;
-    run(`
-      INSERT INTO subscriptions (
-        id, establishment_id, plan_name, formula, formula_name, license_ref,
-        status, max_students, max_users, duration_months, activated_at, expires_at
-      ) VALUES (?, ?, 'EXCELLENCE', 'EXCELLENCE', 'Formule Excellence — Illimité', ?, 'ACTIVE', 1500, 150, 12, CURRENT_TIMESTAMP, date('now', '+1 year'))
-    `, [subId, establishmentId, licRef]);
-    sub = queryOne<any>('SELECT * FROM subscriptions WHERE id = ?', [subId]);
+    sub = {
+      id: subId,
+      establishment_id: establishmentId,
+      plan_name: 'EXCELLENCE',
+      formula: 'EXCELLENCE',
+      formula_name: 'Formule Excellence — Illimité',
+      license_ref: licRef,
+      status: 'ACTIVE',
+      max_students: 1500,
+      max_users: 150,
+      duration_months: 12,
+      activated_at: new Date().toISOString(),
+      expires_at: new Date(Date.now() + 365 * 86400000).toISOString().split('T')[0],
+      renewal_count: 0
+    };
+    await setSubscription(establishmentId, sub);
   }
 
   const previousExpires = sub.expires_at || new Date().toISOString().split('T')[0];
@@ -875,31 +732,28 @@ export function renewEstablishmentLicense(
 
   const renewalId = `REN-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).substring(2, 6).toUpperCase()}`;
 
-  run(`
-    INSERT INTO license_renewals (
-      id, subscription_id, establishment_id, formula, duration_months,
-      previous_expires_at, new_expires_at, notes, renewed_by_name
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `, [
-    renewalId,
-    sub.id,
-    establishmentId,
-    sub.formula || 'EXCELLENCE',
-    durationMonths,
-    previousExpires,
-    newExpiresAt,
-    notes || `Renouvellement officiel de ${durationMonths} mois`,
-    operatorName,
-  ]);
+  const renewalRecord = {
+    id: renewalId,
+    subscription_id: sub.id,
+    establishment_id: establishmentId,
+    formula: sub.formula || 'EXCELLENCE',
+    duration_months: durationMonths,
+    previous_expires_at: previousExpires,
+    new_expires_at: newExpiresAt,
+    notes: notes || `Renouvellement officiel de ${durationMonths} mois`,
+    renewed_by_name: operatorName,
+    created_at: new Date().toISOString()
+  };
+  await setDocData('license_renewals', renewalId, renewalRecord);
 
-  run(`
-    UPDATE subscriptions
-    SET expires_at = ?,
-        status = 'ACTIVE',
-        renewed_at = CURRENT_TIMESTAMP,
-        renewal_count = COALESCE(renewal_count, 0) + 1
-    WHERE id = ?
-  `, [newExpiresAt, sub.id]);
+  const updatedSub = {
+    ...sub,
+    expires_at: newExpiresAt,
+    status: 'ACTIVE',
+    renewed_at: new Date().toISOString(),
+    renewal_count: (sub.renewal_count || 0) + 1
+  };
+  await setSubscription(establishmentId, updatedSub);
 
   logAudit(
     establishmentId,
@@ -911,7 +765,6 @@ export function renewEstablishmentLicense(
     { previousExpires, newExpiresAt, durationMonths, notes }
   );
 
-  saveDb();
   return {
     success: true,
     renewalId,
@@ -922,44 +775,51 @@ export function renewEstablishmentLicense(
 }
 
 /**
- * Modifie la formule commerciale et les plafonds d'un établissement
+ * Modifie la formule commerciale et les plafonds d'un établissement dans Firestore
  */
-export function updateEstablishmentLicenseFormula(
+export async function updateEstablishmentLicenseFormula(
   establishmentId: string,
   formulaKey: 'EXCELLENCE' | 'PACK_MOYEN' | 'START',
   operatorName = "Gestionnaire d'application",
   notes?: string
-): any {
-  let sub = queryOne<any>('SELECT * FROM subscriptions WHERE establishment_id = ?', [establishmentId]);
-  if (!sub) {
-    const est = queryOne<any>('SELECT code FROM establishments WHERE id = ?', [establishmentId]);
-    const subId = `SUB-${Date.now().toString(36).toUpperCase()}`;
-    const licRef = `LIC-${new Date().getFullYear()}-${est?.code || 'GEN'}`;
-    run(`
-      INSERT INTO subscriptions (
-        id, establishment_id, plan_name, formula, formula_name, license_ref,
-        status, max_students, max_users, duration_months, activated_at, expires_at
-      ) VALUES (?, ?, 'EXCELLENCE', 'EXCELLENCE', 'Formule Excellence — Illimité', ?, 'ACTIVE', 1500, 150, 12, CURRENT_TIMESTAMP, date('now', '+1 year'))
-    `, [subId, establishmentId, licRef]);
-    sub = queryOne<any>('SELECT * FROM subscriptions WHERE id = ?', [subId]);
-  }
-
+): Promise<any> {
+  let sub = await getSubscription(establishmentId);
+  const est = await getEstablishment(establishmentId);
   const formulas: Record<string, { name: string; max_students: number; max_staff: number }> = {
     EXCELLENCE: { name: 'Formule Excellence — Illimité', max_students: 1500, max_staff: 150 },
     PACK_MOYEN: { name: 'Formule Pack Moyen', max_students: 700, max_staff: 80 },
     START: { name: 'Formule Start', max_students: 400, max_staff: 50 },
   };
-
   const target = formulas[formulaKey] || formulas.EXCELLENCE;
 
-  run(`
-    UPDATE subscriptions
-    SET formula = ?,
-        formula_name = ?,
-        max_students = ?,
-        max_users = ?
-    WHERE id = ?
-  `, [formulaKey, target.name, target.max_students, target.max_staff, sub.id]);
+  if (!sub) {
+    const subId = `SUB-${Date.now().toString(36).toUpperCase()}`;
+    const licRef = `LIC-${new Date().getFullYear()}-${est?.code || 'GEN'}`;
+    sub = {
+      id: subId,
+      establishment_id: establishmentId,
+      plan_name: formulaKey,
+      formula: formulaKey,
+      formula_name: target.name,
+      license_ref: licRef,
+      status: 'ACTIVE',
+      max_students: target.max_students,
+      max_users: target.max_staff,
+      duration_months: 12,
+      activated_at: new Date().toISOString(),
+      expires_at: new Date(Date.now() + 365 * 86400000).toISOString().split('T')[0],
+      renewal_count: 0
+    };
+  } else {
+    sub = {
+      ...sub,
+      formula: formulaKey,
+      formula_name: target.name,
+      max_students: target.max_students,
+      max_users: target.max_staff
+    };
+  }
+  await setSubscription(establishmentId, sub);
 
   logAudit(
     establishmentId,
@@ -976,7 +836,6 @@ export function updateEstablishmentLicenseFormula(
     }
   );
 
-  saveDb();
   return {
     success: true,
     formula: formulaKey,
@@ -987,51 +846,39 @@ export function updateEstablishmentLicenseFormula(
 }
 
 /**
- * Met à jour le statut d'un établissement (ACTIVE, SUSPENDED, DELETED)
+ * Met à jour le statut d'un établissement (ACTIVE, SUSPENDED, DELETED) dans Firestore
  */
-export function changeEstablishmentStatus(
+export async function changeEstablishmentStatus(
   establishmentId: string,
   newStatus: 'ACTIVE' | 'SUSPENDED' | 'DELETED',
   reason?: string,
   operatorName = 'Développeur Eco GES'
-): any {
+): Promise<any> {
   if (establishmentId === 'EST-ECO-HQ') {
     throw new Error('Impossible de modifier le statut de la plateforme centrale.');
   }
 
-  const est = queryOne<any>('SELECT * FROM establishments WHERE id = ?', [establishmentId]);
+  const est = await getEstablishment(establishmentId);
   if (!est) {
     throw new Error('Établissement introuvable.');
   }
 
+  const updated: any = { ...est, status: newStatus };
   if (newStatus === 'SUSPENDED') {
-    run(`
-      UPDATE establishments
-      SET status = 'SUSPENDED',
-          suspended_at = CURRENT_TIMESTAMP,
-          suspension_reason = ?,
-          suspended_by = ?
-      WHERE id = ?
-    `, [reason || 'Suspension administrative par la direction centrale', operatorName, establishmentId]);
+    updated.suspended_at = new Date().toISOString();
+    updated.suspension_reason = reason || 'Suspension administrative par la direction centrale';
+    updated.suspended_by = operatorName;
   } else if (newStatus === 'ACTIVE') {
-    run(`
-      UPDATE establishments
-      SET status = 'ACTIVE',
-          activated_at = CURRENT_TIMESTAMP,
-          suspended_at = NULL,
-          suspension_reason = NULL,
-          suspended_by = NULL
-      WHERE id = ?
-    `, [establishmentId]);
+    updated.activated_at = new Date().toISOString();
+    updated.suspended_at = null;
+    updated.suspension_reason = null;
+    updated.suspended_by = null;
   } else if (newStatus === 'DELETED') {
-    run(`
-      UPDATE establishments
-      SET status = 'DELETED',
-          deleted_at = CURRENT_TIMESTAMP,
-          deletion_reason = ?
-      WHERE id = ?
-    `, [reason || 'Désactivation / suppression logique', establishmentId]);
+    updated.deleted_at = new Date().toISOString();
+    updated.deletion_reason = reason || 'Désactivation / suppression logique';
   }
+
+  await setEstablishment(establishmentId, updated);
 
   logAudit(
     establishmentId,
@@ -1043,22 +890,21 @@ export function changeEstablishmentStatus(
     { ancienStatut: est.status || 'ACTIVE', nouveauStatut: newStatus, motif: reason }
   );
 
-  saveDb();
-  return queryOne('SELECT * FROM establishments WHERE id = ?', [establishmentId]);
+  return updated;
 }
 
 /**
- * Suppression définitive d'un établissement (réservée au Développeur avec confirmation)
+ * Suppression définitive d'un établissement dans Firestore
  */
-export function deleteEstablishmentPermanently(
+export async function deleteEstablishmentPermanently(
   establishmentId: string,
   operatorName = 'Développeur Eco GES'
-): void {
+): Promise<void> {
   if (establishmentId === 'EST-ECO-HQ') {
     throw new Error('Impossible de supprimer la plateforme centrale.');
   }
 
-  const est = queryOne<any>('SELECT name, code FROM establishments WHERE id = ?', [establishmentId]);
+  const est = await getEstablishment(establishmentId);
   if (!est) {
     throw new Error('Établissement introuvable.');
   }
@@ -1073,214 +919,96 @@ export function deleteEstablishmentPermanently(
     { name: est.name, code: est.code }
   );
 
-  run('DELETE FROM users WHERE establishment_id = ?', [establishmentId]);
-  run('DELETE FROM students WHERE establishment_id = ?', [establishmentId]);
-  run('DELETE FROM classes WHERE establishment_id = ?', [establishmentId]);
-  run('DELETE FROM subjects WHERE establishment_id = ?', [establishmentId]);
-  run('DELETE FROM payments WHERE establishment_id = ?', [establishmentId]);
-  run('DELETE FROM subscriptions WHERE establishment_id = ?', [establishmentId]);
-  run('DELETE FROM audit_logs WHERE establishment_id = ?', [establishmentId]);
-  run('DELETE FROM establishments WHERE id = ?', [establishmentId]);
-
-  saveDb();
+  await deleteDocData('establishments', establishmentId);
+  await deleteDocData('subscriptions', establishmentId);
 }
 
 /**
- * Récupère la liste des promoteurs enregistrés et leurs établissements
+ * Récupère la liste des promoteurs enregistrés et leurs établissements depuis Firestore
  */
-export function getRegisteredPromoters(): any[] {
-  const promoters = queryAll<any>(`
-    SELECT 
-      u.id, u.full_name, u.username, u.email, u.phone, u.status, u.created_at,
-      e.id as establishment_id, e.name as establishment_name, e.code as establishment_code,
-      e.city as establishment_city, e.status as establishment_status
-    FROM users u
-    JOIN establishments e ON u.establishment_id = e.id
-    WHERE u.role = 'PROMOTEUR'
-    ORDER BY u.created_at DESC
-  `);
-  return promoters;
+export async function getRegisteredPromoters(): Promise<any[]> {
+  const allUsers = await listDocs<any>('users');
+  const allEsts = await listEstablishments();
+  const estMap = new Map((allEsts || []).map(e => [e.id, e]));
+
+  const promoters = (allUsers || [])
+    .filter(u => u.role === 'PROMOTEUR')
+    .map(u => {
+      const est = estMap.get(u.establishment_id);
+      return {
+        id: u.id,
+        full_name: u.full_name,
+        username: u.username,
+        email: u.email,
+        phone: u.phone,
+        status: u.status,
+        created_at: u.created_at,
+        establishment_id: u.establishment_id,
+        establishment_name: est?.name || 'Inconnu',
+        establishment_code: est?.code || 'N/A',
+        establishment_city: est?.city || 'N/A',
+        establishment_status: est?.status || 'ACTIVE',
+      };
+    });
+
+  return promoters.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
 }
 
 /**
- * Initialise la plateforme centrale, le compte développeur et les écoles de test.
+ * Initialise la plateforme centrale (désactivé au démarrage pour préserver Firestore)
  */
 export async function ensureMultiSchoolTestEnvironments(): Promise<void> {
-  // 1. Initialiser le compte Plateforme ADMIN_GENERAL Eco GES si manquant
-  let platformHq = queryOne<any>("SELECT id FROM establishments WHERE code = 'ECO-HQ'");
-  if (!platformHq) {
-    run(`
-      INSERT OR REPLACE INTO establishments (
-        id, name, code, country, city, address, phone, email, motto, academic_year, currency, active_cycles, status
-      ) VALUES (
-        'EST-ECO-HQ', 'Plateforme Centrale Eco GES', 'ECO-HQ', 'Congo-Brazzaville', 'Brazzaville',
-        'Direction des Opérations Eco GES', '+242 06 999 00 00', 'direction@ecoges.cg',
-        'Excellence Scolaire & Numérique', '2026-2027', 'FCFA',
-        '["PRE_SCOLAIRE","PRIMAIRE","COLLEGE","LYCEE"]', 'ACTIVE'
-      )
-    `);
-  }
-
-  const standardPass = await hashPassword('EcoGes2026!');
-
-  // Mot de passe souverain du compte Gestionnaire d'application (ADMIN_GENERAL)
-  // Supporte la variable d'environnement ECO_ADMIN_PASSWORD ou la clé configurée
-  const adminPassword = process.env.ECO_ADMIN_PASSWORD || 'Faith.Mick.@Ecoges.2018';
-  const adminPassHash = await hashPassword(adminPassword);
-
-  const adminUser = queryOne<any>("SELECT id, password_hash FROM users WHERE username = 'admin.general' LIMIT 1");
-  if (!adminUser) {
-    run(`
-      INSERT INTO users (
-        id, establishment_id, username, email, password_hash, full_name, phone, role, status
-      ) VALUES (
-        'USR-ADMIN-GEN-01', 'EST-ECO-HQ', 'admin.general', 'superadmin@ecoges.cg', ?,
-        'Administrateur Général Eco GES', '+242 06 999 00 00', 'ADMIN_GENERAL', 'ACTIVE'
-      )
-    `, [adminPassHash]);
-  } else {
-    run('UPDATE users SET password_hash = ? WHERE username = ?', [adminPassHash, 'admin.general']);
-  }
-
-  // 2. Établissement de Test 1 : ECO-001
-  let eco1 = queryOne<any>("SELECT id FROM establishments WHERE code = 'ECO-001'");
-  if (!eco1) {
-    const est1Id = 'EST-ECO-001';
-    run(`
-      INSERT OR REPLACE INTO establishments (
-        id, name, code, country, city, address, phone, email, motto, academic_year, currency, active_cycles,
-        status, promoter_name, promoter_email, promoter_phone
-      ) VALUES (
-        ?, 'Institut Pilote Brazza Excellence', 'ECO-001', 'Congo-Brazzaville', 'Brazzaville',
-        'Boulevard Denis Sassou Nguesso, Ouenzé', '+242 06 701 01 01', 'contact@eco1-excellence.cg',
-        'Rigueur • Savoir • Réussite', '2026-2027', 'FCFA',
-        '["COLLEGE","LYCEE"]', 'ACTIVE', 'M. Rodrigue BIKINDOU', 'promoteur@eco1.cg', '+242 06 701 00 00'
-      )
-    `, [est1Id]);
-
-    const usersEco1 = [
-      { id: 'USR-ECO1-PROM', username: 'prom.eco1', name: 'M. Rodrigue BIKINDOU', role: 'PROMOTEUR', email: 'promoteur@eco1.cg' },
-      { id: 'USR-ECO1-DIR', username: 'directeur.eco1', name: 'M. Rodrigue BIKINDOU', role: 'DIRECTEUR_GENERAL', email: 'directeur@eco1.cg' },
-      { id: 'USR-ECO1-ENS', username: 'prof.eco1', name: 'M. Christian MBOUNGOU', role: 'ENSEIGNANT', email: 'c.mboungou@eco1.cg' },
-      { id: 'USR-ECO1-ELV', username: 'eleve.eco1', name: 'Jean-Marc KOUKA', role: 'ELEVE', email: 'jm.kouka@eco1.cg', stuId: 'STU-ECO1-001' },
-      { id: 'USR-ECO1-PAR', username: 'parent.eco1', name: 'Mme. Véronique KOUKA', role: 'PARENT', email: 'v.kouka@parent.cg' },
-    ];
-
-    for (const u of usersEco1) {
-      run(`
-        INSERT OR REPLACE INTO users (
-          id, establishment_id, username, email, password_hash, full_name, phone, role, student_id, status
-        ) VALUES (?, ?, ?, ?, ?, ?, '+242 06 701 00 00', ?, ?, 'ACTIVE')
-      `, [u.id, est1Id, u.username, u.email, standardPass, u.name, u.role, (u as any).stuId || null]);
-    }
-
-    run(`
-      INSERT OR REPLACE INTO classes (id, establishment_id, academic_year, name, cycle_code, level_code, serie_code, room, capacity, main_teacher_id)
-      VALUES 
-      ('CLS-ECO1-3A', ?, '2026-2027', '3ème Excellence A', 'COLLEGE', '3ème', null, 'Salle 101', 40, 'USR-ECO1-ENS'),
-      ('CLS-ECO1-TLE-C', ?, '2026-2027', 'Terminale C Pilote', 'LYCEE', 'Terminale', 'C', 'Salle 204', 35, 'USR-ECO1-ENS')
-    `, [est1Id, est1Id]);
-
-    run(`
-      INSERT OR REPLACE INTO subscriptions (id, establishment_id, plan_name, status, max_students, max_users, expires_at)
-      VALUES ('SUB-ECO-001', ?, 'PREMIUM', 'ACTIVE', 800, 60, date('now', '+1 year'))
-    `, [est1Id]);
-  }
-
-  // 3. Établissement de Test 2 : ECO-002
-  let eco2 = queryOne<any>("SELECT id FROM establishments WHERE code = 'ECO-002'");
-  if (!eco2) {
-    const est2Id = 'EST-ECO-002';
-    run(`
-      INSERT OR REPLACE INTO establishments (
-        id, name, code, country, city, address, phone, email, motto, academic_year, currency, active_cycles,
-        status, promoter_name, promoter_email, promoter_phone
-      ) VALUES (
-        ?, 'Collège Moderne du Littoral', 'ECO-002', 'Congo-Brazzaville', 'Pointe-Noire',
-        'Avenue Moe Pratt, Centre-Ville', '+242 05 602 02 02', 'contact@eco2-littoral.cg',
-        'Travail • Intégrité • Progrès', '2026-2027', 'FCFA',
-        '["PRIMAIRE","COLLEGE"]', 'ACTIVE', 'Dr. Solange MAVOUNGOU', 'promotrice@eco2.cg', '+242 05 602 00 00'
-      )
-    `, [est2Id]);
-
-    const usersEco2 = [
-      { id: 'USR-ECO2-PROM', username: 'prom.eco2', name: 'Dr. Solange MAVOUNGOU', role: 'PROMOTEUR', email: 'promotrice@eco2.cg' },
-      { id: 'USR-ECO2-DIR', username: 'directeur.eco2', name: 'Dr. Solange MAVOUNGOU', role: 'DIRECTEUR_GENERAL', email: 'directrice@eco2.cg' },
-      { id: 'USR-ECO2-ENS', username: 'prof.eco2', name: 'M. Fabrice LOUNDOU', role: 'ENSEIGNANT', email: 'f.loundou@eco2.cg' },
-      { id: 'USR-ECO2-ELV', username: 'eleve.eco2', name: 'Grace TCHISSEMBO', role: 'ELEVE', email: 'g.tchissembo@eco2.cg', stuId: 'STU-ECO2-001' },
-    ];
-
-    for (const u of usersEco2) {
-      run(`
-        INSERT OR REPLACE INTO users (
-          id, establishment_id, username, email, password_hash, full_name, phone, role, student_id, status
-        ) VALUES (?, ?, ?, ?, ?, ?, '+242 05 602 00 00', ?, ?, 'ACTIVE')
-      `, [u.id, est2Id, u.username, u.email, standardPass, u.name, u.role, (u as any).stuId || null]);
-    }
-
-    run(`
-      INSERT OR REPLACE INTO subscriptions (id, establishment_id, plan_name, status, max_students, max_users, expires_at)
-      VALUES ('SUB-ECO-002', ?, 'STANDARD', 'ACTIVE', 500, 40, date('now', '+1 year'))
-    `, [est2Id]);
-  }
-
-  // 4. Initialisation des Codes d'Autorisation de Test si la table est vide
-  const authCount = queryOne<any>('SELECT COUNT(*) as count FROM creation_authorizations');
-  if (!authCount || authCount.count === 0) {
-    run(`
-      INSERT INTO creation_authorizations (
-        id, code, promoter_name, promoter_email, promoter_phone, notes, status,
-        created_by_user_id, created_by_name, created_at, expires_at
-      ) VALUES
-      (
-        'AUTH-INIT-001', 'ECO-AUTH-2026-PILOTE-BRAZZA',
-        'M. Denis Sassou Mouanda', 'mickmouanda@gmail.com', '+242 06 600 00 01',
-        'Autorisation officielle pour établissement pilote à Brazzaville', 'AVAILABLE',
-        'USR-ADMIN-GEN-01', 'Développeur Eco GES', CURRENT_TIMESTAMP, date('now', '+90 days')
-      ),
-      (
-        'AUTH-INIT-002', 'ECO-AUTH-2026-EXCELLENCE-PN',
-        'Dr. Solange Mavoungou', 'solange.mavoungou@gmail.com', '+242 05 500 00 02',
-        'Autorisation pour établissement d enseignement général à Pointe-Noire', 'AVAILABLE',
-        'USR-ADMIN-GEN-01', 'Développeur Eco GES', CURRENT_TIMESTAMP, date('now', '+90 days')
-      )
-    `);
-  }
-
-  saveDb();
+  return;
 }
 
 /**
- * Recherche les comptes promoteurs et leurs établissements associés pour le module d'assistance
+ * Recherche les comptes promoteurs et leurs établissements associés depuis Firestore
  */
-export function searchPromotersNetwork(searchTerm?: string): any[] {
-  let sql = `
-    SELECT 
-      u.id as promoter_user_id,
-      u.username,
-      u.email as promoter_email,
-      u.full_name as promoter_name,
-      u.phone as promoter_phone,
-      u.status as promoter_status,
-      u.created_at as promoter_created_at,
-      e.id as establishment_id,
-      e.name as establishment_name,
-      e.code as establishment_code,
-      e.city,
-      e.country,
-      e.academic_year,
-      e.status as establishment_status
-    FROM users u
-    JOIN establishments e ON u.establishment_id = e.id
-    WHERE u.role = 'PROMOTEUR'
-  `;
-  const params: any[] = [];
-  if (searchTerm && searchTerm.trim()) {
-    const q = `%${searchTerm.trim().toLowerCase()}%`;
-    sql += ` AND (LOWER(e.name) LIKE ? OR LOWER(e.code) LIKE ? OR LOWER(u.full_name) LIKE ? OR LOWER(u.username) LIKE ? OR LOWER(COALESCE(u.email, '')) LIKE ? OR LOWER(COALESCE(u.phone, '')) LIKE ?)`;
-    params.push(q, q, q, q, q, q);
+export async function searchPromotersNetwork(searchTerm?: string): Promise<any[]> {
+  const allPromoters = await getRegisteredPromoters();
+  if (!searchTerm || !searchTerm.trim()) {
+    return allPromoters.map(p => ({
+      promoter_user_id: p.id,
+      username: p.username,
+      promoter_email: p.email,
+      promoter_name: p.full_name,
+      promoter_phone: p.phone,
+      promoter_status: p.status,
+      promoter_created_at: p.created_at,
+      establishment_id: p.establishment_id,
+      establishment_name: p.establishment_name,
+      establishment_code: p.establishment_code,
+      city: p.establishment_city,
+      country: 'Congo-Brazzaville',
+      academic_year: '2026-2027',
+      establishment_status: p.establishment_status,
+    }));
   }
-  sql += ` ORDER BY e.created_at DESC`;
-  return queryAll(sql, params);
-}
 
+  const q = searchTerm.trim().toLowerCase();
+  return allPromoters
+    .filter(p =>
+      (p.establishment_name || '').toLowerCase().includes(q) ||
+      (p.establishment_code || '').toLowerCase().includes(q) ||
+      (p.full_name || '').toLowerCase().includes(q) ||
+      (p.username || '').toLowerCase().includes(q) ||
+      (p.email || '').toLowerCase().includes(q) ||
+      (p.phone || '').toLowerCase().includes(q)
+    )
+    .map(p => ({
+      promoter_user_id: p.id,
+      username: p.username,
+      promoter_email: p.email,
+      promoter_name: p.full_name,
+      promoter_phone: p.phone,
+      promoter_status: p.status,
+      promoter_created_at: p.created_at,
+      establishment_id: p.establishment_id,
+      establishment_name: p.establishment_name,
+      establishment_code: p.establishment_code,
+      city: p.establishment_city,
+      country: 'Congo-Brazzaville',
+      academic_year: '2026-2027',
+      establishment_status: p.establishment_status,
+    }));
+}

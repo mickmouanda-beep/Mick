@@ -25,13 +25,22 @@ import {
   TrendingUp,
   Send,
   HelpCircle,
+  Download,
 } from 'lucide-react';
 import { api } from '../lib/api.ts';
 import { useAuth } from '../context/AuthContext.tsx';
 import { SchoolClass, DisciplinaryIncident, Student, TeacherAttendance, Complaint, Subject, StaffAttendanceRules } from '../types.ts';
+import { PrintHeader } from '../components/PrintHeader.tsx';
+import { printDocument, downloadPdf } from '../utils/printPdfUtils.ts';
+import { CustomizableAttendanceSheet } from '../components/documents/CustomizableAttendanceSheet.tsx';
 
 export const AttendanceView: React.FC = () => {
-  const { hasRole, user } = useAuth();
+  const { hasRole, user, establishment } = useAuth();
+  const canRecord = hasRole(['SURVEILLANT', 'DIRECTEUR_ETUDES', 'DIRECTEUR_GENERAL', 'PROMOTEUR', 'ENSEIGNANT']);
+  const isSurveillantOrDirection = hasRole(['SURVEILLANT', 'DIRECTEUR_ETUDES', 'DIRECTEUR_GENERAL', 'PROMOTEUR']);
+  const isDirection = hasRole(['DIRECTEUR_ETUDES', 'DIRECTEUR_GENERAL', 'PROMOTEUR']);
+
+  const [showPrintSheetModal, setShowPrintSheetModal] = useState(false);
   const [mainSpace, setMainSpace] = useState<'students' | 'teachers' | 'complaints' | 'reports' | 'rules'>('students');
   const [classes, setClasses] = useState<SchoolClass[]>([]);
   const [subjects, setSubjects] = useState<Subject[]>([]);
@@ -39,12 +48,24 @@ export const AttendanceView: React.FC = () => {
   const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split('T')[0]);
   const [attendanceRecords, setAttendanceRecords] = useState<any[]>([]);
   const [incidents, setIncidents] = useState<DisciplinaryIncident[]>([]);
-  const [activeTab, setActiveTab] = useState<'rollcall' | 'discipline' | 'justifications'>('rollcall');
+  const [activeTab, setActiveTab] = useState<'rollcall' | 'course_rollcall' | 'alerts' | 'discipline' | 'justifications'>(
+    user?.role === 'ENSEIGNANT' ? 'course_rollcall' : 'rollcall'
+  );
   const [justificationsList, setJustificationsList] = useState<any[]>([]);
   const [justifReviewModal, setJustifReviewModal] = useState<any | null>(null);
   const [justifReviewNote, setJustifReviewNote] = useState('');
   const [justifReviewLoading, setJustifReviewLoading] = useState(false);
   const [loading, setLoading] = useState(false);
+
+  // Course Rollcall & Alerts States
+  const [courseSchedules, setCourseSchedules] = useState<any[]>([]);
+  const [selectedScheduleId, setSelectedScheduleId] = useState('');
+  const [selectedSessionType, setSelectedSessionType] = useState<'MATIN' | 'FIN_MATINEE' | 'COURS'>('COURS');
+  const [courseStudents, setCourseStudents] = useState<any[]>([]);
+  const [courseEditReason, setCourseEditReason] = useState('');
+  const [courseSaving, setCourseSaving] = useState(false);
+  const [alertsList, setAlertsList] = useState<any[]>([]);
+  const [alertsLoading, setAlertsLoading] = useState(false);
 
   // Staff Attendance Rules (Promoteur / Direction)
   const [attendanceRules, setAttendanceRules] = useState<StaffAttendanceRules | null>(null);
@@ -57,6 +78,8 @@ export const AttendanceView: React.FC = () => {
     overtimeHourlyBonus: 1500,
     checkinModePreschoolPrimary: 'JOURNALIER' as 'JOURNALIER' | 'PAR_SEANCE',
     checkinModeCollegeLycee: 'PAR_SEANCE' as 'JOURNALIER' | 'PAR_SEANCE',
+    preschoolPrimaryMorningTime: '07:30',
+    preschoolPrimaryNoonTime: '12:00',
   });
 
   // Teacher Pointage state
@@ -161,9 +184,7 @@ export const AttendanceView: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
-  const canRecord = hasRole(['SURVEILLANT', 'DIRECTEUR_ETUDES', 'DIRECTEUR_GENERAL', 'PROMOTEUR', 'ENSEIGNANT']);
-  const isSurveillantOrDirection = hasRole(['SURVEILLANT', 'DIRECTEUR_ETUDES', 'DIRECTEUR_GENERAL', 'PROMOTEUR']);
-  const isDirection = hasRole(['DIRECTEUR_ETUDES', 'DIRECTEUR_GENERAL', 'PROMOTEUR']);
+
 
   useEffect(() => {
     api.getClasses().then((cls) => {
@@ -232,9 +253,10 @@ export const AttendanceView: React.FC = () => {
   const loadJustifications = async () => {
     try {
       const data = await api.getAbsenceJustifications();
-      setJustificationsList(data);
+      setJustificationsList(Array.isArray(data) ? data : []);
     } catch (err) {
       console.error(err);
+      setJustificationsList([]);
     }
   };
 
@@ -270,6 +292,8 @@ export const AttendanceView: React.FC = () => {
           overtimeHourlyBonus: data.overtime_hourly_bonus ?? 1500,
           checkinModePreschoolPrimary: data.checkin_mode_preschool_primary || 'JOURNALIER',
           checkinModeCollegeLycee: data.checkin_mode_college_lycee || 'PAR_SEANCE',
+          preschoolPrimaryMorningTime: data.preschool_primary_morning_time || '07:30',
+          preschoolPrimaryNoonTime: data.preschool_primary_noon_time || '12:00',
         });
       }
     } catch (err: any) {
@@ -294,10 +318,80 @@ export const AttendanceView: React.FC = () => {
     }
   };
 
+  const loadCourseSchedules = async () => {
+    try {
+      const schs = await api.getSchedules({ classId: selectedClassId });
+      setCourseSchedules(schs || []);
+      if (schs && schs.length > 0 && !selectedScheduleId) {
+        setSelectedScheduleId(schs[0].id);
+      }
+    } catch (err) {
+      console.error('Erreur chargement emplois du temps:', err);
+    }
+  };
+
+  const loadCourseAttendance = async () => {
+    if (!selectedClassId || !selectedDate) return;
+    try {
+      const [studentsData, caData] = await Promise.all([
+        api.getStudents({ classId: selectedClassId }),
+        api.getCourseAttendance({
+          classId: selectedClassId,
+          date: selectedDate,
+          scheduleId: selectedScheduleId || undefined,
+          sessionType: selectedSessionType || undefined,
+        }),
+      ]);
+
+      const caMap = new Map((caData || []).map((item: any) => [item.student_id, item]));
+
+      const merged = (studentsData || [])
+        .filter((s: any) => s.status !== 'ARCHIVE')
+        .map((s: any) => {
+          const ca = caMap.get(s.id);
+          return {
+            student_id: s.id,
+            matricule: s.matricule,
+            first_name: s.first_name,
+            last_name: s.last_name,
+            status: ca?.status || 'PRESENT',
+            motif_category: ca?.motif_category || '',
+            motif: ca?.motif || '',
+          };
+        });
+
+      merged.sort((a: any, b: any) => (a.last_name || '').localeCompare(b.last_name || ''));
+      setCourseStudents(merged);
+    } catch (err) {
+      console.error('Erreur chargement présence cours:', err);
+    }
+  };
+
+  const loadAlerts = async () => {
+    if (!isSurveillantOrDirection) return;
+    setAlertsLoading(true);
+    try {
+      const res = await api.getAttendanceAlerts(selectedDate);
+      setAlertsList(res || []);
+    } catch (err) {
+      console.error('Erreur chargement alertes:', err);
+    } finally {
+      setAlertsLoading(false);
+    }
+  };
+
   useEffect(() => {
     if (mainSpace === 'students') {
-      loadAttendance();
-      loadJustifications();
+      if (activeTab === 'rollcall') {
+        loadAttendance();
+      } else if (activeTab === 'course_rollcall') {
+        loadCourseSchedules();
+        loadCourseAttendance();
+      } else if (activeTab === 'alerts' && isSurveillantOrDirection) {
+        loadAlerts();
+      } else if (activeTab === 'justifications') {
+        loadJustifications();
+      }
     } else if (mainSpace === 'teachers') {
       loadTeacherPointage();
     } else if (mainSpace === 'complaints') {
@@ -307,12 +401,24 @@ export const AttendanceView: React.FC = () => {
     } else if (mainSpace === 'rules') {
       loadRules();
     }
-  }, [selectedClassId, selectedDate, mainSpace, teacherPointageDate]);
+  }, [selectedClassId, selectedDate, selectedScheduleId, selectedSessionType, activeTab, mainSpace, teacherPointageDate]);
 
   // Rollcall handlers
   const handleStatusChange = (studentId: string, status: string) => {
     setAttendanceRecords((prev) =>
       prev.map((r) => (r.student_id === studentId ? { ...r, status } : r))
+    );
+  };
+
+  const handleArrivalTimeChange = (studentId: string, actual_arrival_time: string) => {
+    setAttendanceRecords((prev) =>
+      prev.map((r) => (r.student_id === studentId ? { ...r, actual_arrival_time, actualArrivalTime: actual_arrival_time } : r))
+    );
+  };
+
+  const handleDepartureTimeChange = (studentId: string, actual_departure_time: string) => {
+    setAttendanceRecords((prev) =>
+      prev.map((r) => (r.student_id === studentId ? { ...r, actual_departure_time, actualDepartureTime: actual_departure_time } : r))
     );
   };
 
@@ -334,11 +440,68 @@ export const AttendanceView: React.FC = () => {
     if (!selectedClassId || !selectedDate) return;
     setError(null);
     try {
-      await api.saveAttendance(selectedClassId, selectedDate, attendanceRecords);
+      const recordsToSave = attendanceRecords.map((r) => ({
+        studentId: r.student_id,
+        status: r.status || 'PRESENT',
+        actualArrivalTime: r.actual_arrival_time || r.actualArrivalTime || null,
+        actualDepartureTime: r.actual_departure_time || r.actualDepartureTime || null,
+        isJustified: r.is_justified,
+        justificationReason: r.justification_reason,
+      }));
+      await api.saveAttendance(selectedClassId, selectedDate, recordsToSave);
       setSuccess("Feuille d'émargement de la classe enregistrée avec succès.");
       loadAttendance();
     } catch (err: any) {
       setError(err.message || "Erreur lors de l'enregistrement de l'appel.");
+    }
+  };
+
+  const handleCourseStatusChange = (studentId: string, status: string) => {
+    setCourseStudents((prev) =>
+      prev.map((s) => (s.student_id === studentId ? { ...s, status } : s))
+    );
+  };
+
+  const handleCourseMotifCategoryChange = (studentId: string, category: string) => {
+    setCourseStudents((prev) =>
+      prev.map((s) => (s.student_id === studentId ? { ...s, motif_category: category } : s))
+    );
+  };
+
+  const handleCourseMotifTextChange = (studentId: string, motif: string) => {
+    setCourseStudents((prev) =>
+      prev.map((s) => (s.student_id === studentId ? { ...s, motif } : s))
+    );
+  };
+
+  const handleSaveCourseAttendance = async () => {
+    if (!selectedClassId || !selectedDate) return;
+    setError(null);
+    setCourseSaving(true);
+    try {
+      const records = courseStudents.map((s) => ({
+        studentId: s.student_id,
+        status: s.status || 'PRESENT',
+        motifCategory: s.motif_category || null,
+        motif: s.motif || null,
+      }));
+
+      await api.saveCourseAttendance({
+        classId: selectedClassId,
+        date: selectedDate,
+        scheduleId: selectedScheduleId || undefined,
+        sessionType: selectedSessionType || undefined,
+        records,
+        editReason: courseEditReason || undefined,
+      });
+
+      setSuccess("Appel de présence au cours / séance enregistré avec succès dans Firestore.");
+      setCourseEditReason('');
+      loadCourseAttendance();
+    } catch (err: any) {
+      setError(err.message || "Erreur lors de l'enregistrement de l'appel de cours.");
+    } finally {
+      setCourseSaving(false);
     }
   };
 
@@ -593,33 +756,66 @@ export const AttendanceView: React.FC = () => {
       )}
 
       {/* ======================================================== */}
-      {/* ESPACE 1 : SURVEILLANCE DES ÉLÈVES */}
+      {/* ESPACE 1 : SURVEILLANCE & APPEL DE PRÉSENCE ÉLÈVES */}
       {/* ======================================================== */}
       {mainSpace === 'students' && (
         <div className="space-y-4">
-          <div className="flex border-b border-slate-800 text-xs font-semibold">
+          <div className="flex border-b border-slate-800 text-xs font-semibold overflow-x-auto">
             <button
               onClick={() => setActiveTab('rollcall')}
-              className={`px-4 py-2.5 border-b-2 transition flex items-center space-x-2 cursor-pointer ${
+              className={`px-4 py-2.5 border-b-2 transition flex items-center space-x-2 whitespace-nowrap cursor-pointer ${
                 activeTab === 'rollcall'
                   ? 'border-indigo-500 text-indigo-400 font-bold'
                   : 'border-transparent text-slate-400 hover:text-slate-200'
               }`}
             >
               <UserCheck className="w-4 h-4" />
-              <span>Feuille d'Appel / Présences journalières</span>
+              <span>1. Appel Établissement (Surveillant)</span>
             </button>
 
             <button
+              onClick={() => {
+                setActiveTab('course_rollcall');
+                loadCourseSchedules();
+                loadCourseAttendance();
+              }}
+              className={`px-4 py-2.5 border-b-2 transition flex items-center space-x-2 whitespace-nowrap cursor-pointer ${
+                activeTab === 'course_rollcall'
+                  ? 'border-indigo-500 text-indigo-400 font-bold'
+                  : 'border-transparent text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <ClipboardList className="w-4 h-4" />
+              <span>2. Appel par Cours / Séance (Enseignant)</span>
+            </button>
+
+            {isSurveillantOrDirection && (
+              <button
+                onClick={() => {
+                  setActiveTab('alerts');
+                  loadAlerts();
+                }}
+                className={`px-4 py-2.5 border-b-2 transition flex items-center space-x-2 whitespace-nowrap cursor-pointer ${
+                  activeTab === 'alerts'
+                    ? 'border-indigo-500 text-indigo-400 font-bold'
+                    : 'border-transparent text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <AlertTriangle className="w-4 h-4 text-amber-400" />
+                <span>3. Alertes & Discordances</span>
+              </button>
+            )}
+
+            <button
               onClick={() => setActiveTab('discipline')}
-              className={`px-4 py-2.5 border-b-2 transition flex items-center space-x-2 cursor-pointer ${
+              className={`px-4 py-2.5 border-b-2 transition flex items-center space-x-2 whitespace-nowrap cursor-pointer ${
                 activeTab === 'discipline'
                   ? 'border-indigo-500 text-indigo-400 font-bold'
                   : 'border-transparent text-slate-400 hover:text-slate-200'
               }`}
             >
               <ShieldAlert className="w-4 h-4" />
-              <span>Suivi de la Conduite & Incidents ({incidents.length})</span>
+              <span>4. Suivi de la Conduite ({incidents.length})</span>
             </button>
 
             <button
@@ -627,22 +823,23 @@ export const AttendanceView: React.FC = () => {
                 setActiveTab('justifications');
                 loadJustifications();
               }}
-              className={`px-4 py-2.5 border-b-2 transition flex items-center space-x-2 cursor-pointer ${
+              className={`px-4 py-2.5 border-b-2 transition flex items-center space-x-2 whitespace-nowrap cursor-pointer ${
                 activeTab === 'justifications'
                   ? 'border-indigo-500 text-indigo-400 font-bold'
                   : 'border-transparent text-slate-400 hover:text-slate-200'
               }`}
             >
               <FileText className="w-4 h-4" />
-              <span>Justifications d'Absences Déposées</span>
-              {justificationsList.filter((j) => j.status === 'EN_ATTENTE').length > 0 && (
+              <span>5. Justifications Déposées</span>
+              {(Array.isArray(justificationsList) ? justificationsList : []).filter((j) => j.status === 'EN_ATTENTE').length > 0 && (
                 <span className="px-1.5 py-0.2 bg-amber-500 text-slate-950 font-black rounded-full text-[10px]">
-                  {justificationsList.filter((j) => j.status === 'EN_ATTENTE').length}
+                  {(Array.isArray(justificationsList) ? justificationsList : []).filter((j) => j.status === 'EN_ATTENTE').length}
                 </span>
               )}
             </button>
           </div>
 
+          {/* 1. APPEL GLOBAL ÉTABLISSEMENT (SURVEILLANT) */}
           {activeTab === 'rollcall' && (
             <div className="space-y-4">
               <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs">
@@ -682,6 +879,16 @@ export const AttendanceView: React.FC = () => {
                     <span className="text-amber-400 font-bold">{lateCount} Retards</span>
                   </div>
 
+                  <button
+                    type="button"
+                    onClick={() => setShowPrintSheetModal(true)}
+                    className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 font-semibold rounded-lg transition flex items-center space-x-1.5 cursor-pointer text-xs"
+                    title="Imprimer la feuille d'émargement officielle de la classe"
+                  >
+                    <Printer className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>Feuille d'Appel</span>
+                  </button>
+
                   {canRecord && (
                     <button
                       onClick={handleSaveAttendance}
@@ -693,27 +900,29 @@ export const AttendanceView: React.FC = () => {
                 </div>
               </div>
 
-              {/* Table appel */}
+              {/* Table appel Surveillant avec Heure Arrivée & Heure Départ */}
               <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-sm overflow-x-auto">
-                <table className="w-full text-left text-xs text-slate-300 min-w-[640px]">
+                <table className="w-full text-left text-xs text-slate-300 min-w-[850px]">
                   <thead className="bg-slate-800/60 text-slate-400 uppercase tracking-wider text-[10px] border-b border-slate-800">
                     <tr>
                       <th className="p-3.5">Matricule</th>
                       <th className="p-3.5">Élève</th>
                       <th className="p-3.5">Statut de Présence</th>
+                      <th className="p-3.5">Heure Arrivée</th>
+                      <th className="p-3.5">Heure Départ</th>
                       <th className="p-3.5">Justificatif & Motif</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-800/60">
                     {attendanceRecords.length === 0 ? (
                       <tr>
-                        <td colSpan={4} className="p-8 text-center text-slate-500">
+                        <td colSpan={6} className="p-8 text-center text-slate-500">
                           {loading ? 'Chargement en cours...' : 'Aucun élève inscrit dans cette classe.'}
                         </td>
                       </tr>
                     ) : (
-                      attendanceRecords.map((r) => (
-                        <tr key={r.student_id} className="hover:bg-slate-800/40">
+                      attendanceRecords.map((r, idx) => (
+                        <tr key={r.student_id ? `${r.student_id}-${idx}` : `att-rec-${idx}`} className="hover:bg-slate-800/40">
                           <td className="p-3.5 font-mono text-slate-400">{r.matricule}</td>
                           <td className="p-3.5 font-bold text-white">
                             {r.last_name} {r.first_name}
@@ -724,6 +933,7 @@ export const AttendanceView: React.FC = () => {
                                 <button
                                   key={st}
                                   type="button"
+                                  disabled={isDirection && user?.role !== 'SURVEILLANT'}
                                   onClick={() => handleStatusChange(r.student_id, st)}
                                   className={`px-2.5 py-1 rounded text-[10px] font-bold transition cursor-pointer ${
                                     r.status === st
@@ -741,6 +951,22 @@ export const AttendanceView: React.FC = () => {
                             </div>
                           </td>
                           <td className="p-3.5">
+                            <input
+                              type="time"
+                              value={r.actual_arrival_time || r.actualArrivalTime || ''}
+                              onChange={(e) => handleArrivalTimeChange(r.student_id, e.target.value)}
+                              className="px-2 py-1 bg-slate-800 border border-slate-700 rounded text-emerald-400 font-mono text-[11px] w-24"
+                            />
+                          </td>
+                          <td className="p-3.5">
+                            <input
+                              type="time"
+                              value={r.actual_departure_time || r.actualDepartureTime || ''}
+                              onChange={(e) => handleDepartureTimeChange(r.student_id, e.target.value)}
+                              className="px-2 py-1 bg-slate-800 border border-slate-700 rounded text-amber-400 font-mono text-[11px] w-24"
+                            />
+                          </td>
+                          <td className="p-3.5">
                             {r.status !== 'PRESENT' ? (
                               <div className="flex items-center space-x-2">
                                 <label className="flex items-center space-x-1 cursor-pointer">
@@ -755,10 +981,10 @@ export const AttendanceView: React.FC = () => {
                                 {r.is_justified && (
                                   <input
                                     type="text"
-                                    placeholder="Motif (ex: Certificat médical, permission parentale)..."
+                                    placeholder="Motif (ex: Certificat médical)..."
                                     value={r.justification_reason || ''}
                                     onChange={(e) => handleJustifyChange(r.student_id, true, e.target.value)}
-                                    className="px-2 py-1 bg-slate-800 border border-slate-700 rounded text-white text-[11px] w-64"
+                                    className="px-2 py-1 bg-slate-800 border border-slate-700 rounded text-white text-[11px] w-48"
                                   />
                                 )}
                               </div>
@@ -772,6 +998,265 @@ export const AttendanceView: React.FC = () => {
                   </tbody>
                 </table>
               </div>
+            </div>
+          )}
+
+          {/* 2. APPEL PAR COURS / SÉANCE (ENSEIGNANT) */}
+          {activeTab === 'course_rollcall' && (
+            <div className="space-y-4">
+              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-3 text-xs">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex flex-wrap items-center gap-3">
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-400 mb-1">Classe</label>
+                      <select
+                        value={selectedClassId}
+                        onChange={(e) => setSelectedClassId(e.target.value)}
+                        className="px-3 py-1.5 bg-slate-800 border border-slate-700 rounded-lg text-slate-200 font-semibold"
+                      >
+                        {classes.map((c) => (
+                          <option key={c.id} value={c.id}>
+                            {c.name} ({c.level_code})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-semibold text-slate-400 mb-1">Date</label>
+                      <input
+                        type="date"
+                        value={selectedDate}
+                        onChange={(e) => setSelectedDate(e.target.value)}
+                        className="px-3 py-1.5 bg-slate-800 border border-slate-700 rounded-lg text-slate-200 font-semibold"
+                      />
+                    </div>
+
+                    {/* Sélection Préscolaire/Primaire (Séance Matin / Fin de matinée) vs Collège/Lycée (Emploi du Temps) */}
+                    {classes.find((c) => c.id === selectedClassId)?.cycle_code === 'PRE_SCOLAIRE' || classes.find((c) => c.id === selectedClassId)?.cycle_code === 'PRIMAIRE' ? (
+                      <div>
+                        <label className="block text-[11px] font-semibold text-slate-400 mb-1">Séance d'Appel (Préscolaire / Primaire)</label>
+                        <select
+                          value={selectedSessionType}
+                          onChange={(e) => setSelectedSessionType(e.target.value as any)}
+                          className="px-3 py-1.5 bg-slate-800 border border-slate-700 rounded-lg text-amber-300 font-bold"
+                        >
+                          <option value="MATIN">Appel du matin ({attendanceRules?.preschool_primary_morning_time || '07:30'})</option>
+                          <option value="FIN_MATINEE">Appel de fin de matinée ({attendanceRules?.preschool_primary_noon_time || '12:00'})</option>
+                        </select>
+                      </div>
+                    ) : (
+                      <div>
+                        <label className="block text-[11px] font-semibold text-slate-400 mb-1">Cours de l'Emploi du Temps (Collège / Lycée)</label>
+                        <select
+                          value={selectedScheduleId}
+                          onChange={(e) => setSelectedScheduleId(e.target.value)}
+                          className="px-3 py-1.5 bg-slate-800 border border-slate-700 rounded-lg text-indigo-300 font-bold max-w-xs"
+                        >
+                          <option value="">Sélectionner le cours...</option>
+                          {courseSchedules.map((s) => (
+                            <option key={s.id} value={s.id}>
+                              {s.subject_name} ({s.start_time} - {s.end_time}) • {s.teacher_name || 'Enseignant'}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="flex items-center space-x-2">
+                    {canRecord && (
+                      <button
+                        onClick={handleSaveCourseAttendance}
+                        disabled={courseSaving}
+                        className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl transition shadow cursor-pointer disabled:opacity-50"
+                      >
+                        {courseSaving ? 'Enregistrement...' : 'Valider l\'Appel du Cours'}
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Saisie obligatoire du motif si modification post-appel (date antérieure) */}
+                {selectedDate !== new Date().toISOString().split('T')[0] && (
+                  <div className="p-2.5 bg-amber-950/40 border border-amber-800/60 rounded-xl text-amber-200 text-xs space-y-1">
+                    <span className="font-bold flex items-center space-x-1">
+                      <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
+                      <span>Appel à date antérieure : Motif obligatoire pour traçabilité</span>
+                    </span>
+                    <input
+                      type="text"
+                      placeholder="Préciser le motif de la modification rétroactive (ex: Rectification oubli enseignant)..."
+                      value={courseEditReason}
+                      onChange={(e) => setCourseEditReason(e.target.value)}
+                      className="w-full px-3 py-1.5 bg-slate-900 border border-amber-800/80 rounded-lg text-white font-medium"
+                    />
+                  </div>
+                )}
+              </div>
+
+              {/* Table appel de cours */}
+              <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-sm overflow-x-auto">
+                <table className="w-full text-left text-xs text-slate-300 min-w-[800px]">
+                  <thead className="bg-slate-800/60 text-slate-400 uppercase tracking-wider text-[10px] border-b border-slate-800">
+                    <tr>
+                      <th className="p-3.5">Matricule</th>
+                      <th className="p-3.5">Élève</th>
+                      <th className="p-3.5">Statut au Cours</th>
+                      <th className="p-3.5">Catégorie de Motif</th>
+                      <th className="p-3.5">Explication / Observation Enseignant</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/60">
+                    {courseStudents.length === 0 ? (
+                      <tr>
+                        <td colSpan={5} className="p-8 text-center text-slate-500">
+                          Aucun élève chargé pour ce cours ou cette classe.
+                        </td>
+                      </tr>
+                    ) : (
+                      courseStudents.map((s, idx) => (
+                        <tr key={s.student_id ? `${s.student_id}-${idx}` : `ca-stu-${idx}`} className="hover:bg-slate-800/40">
+                          <td className="p-3.5 font-mono text-slate-400">{s.matricule}</td>
+                          <td className="p-3.5 font-bold text-white">
+                            {s.last_name} {s.first_name}
+                          </td>
+                          <td className="p-3.5">
+                            <div className="flex items-center space-x-1.5">
+                              {['PRESENT', 'ABSENT', 'RETARD'].map((st) => (
+                                <button
+                                  key={st}
+                                  type="button"
+                                  onClick={() => handleCourseStatusChange(s.student_id, st)}
+                                  className={`px-2.5 py-1 rounded text-[10px] font-bold transition cursor-pointer ${
+                                    s.status === st
+                                      ? st === 'PRESENT'
+                                        ? 'bg-emerald-600 text-white'
+                                        : st === 'ABSENT'
+                                        ? 'bg-rose-600 text-white'
+                                        : 'bg-amber-600 text-white'
+                                      : 'bg-slate-800 text-slate-400 hover:text-white'
+                                  }`}
+                                >
+                                  {st === 'PRESENT' ? 'Présent' : st === 'ABSENT' ? 'Absent' : 'Retard'}
+                                </button>
+                              ))}
+                            </div>
+                          </td>
+                          <td className="p-3.5">
+                            {s.status !== 'PRESENT' ? (
+                              <select
+                                value={s.motif_category || ''}
+                                onChange={(e) => handleCourseMotifCategoryChange(s.student_id, e.target.value)}
+                                className="px-2.5 py-1 bg-slate-800 border border-slate-700 rounded text-slate-200 text-[11px]"
+                              >
+                                <option value="">Choisir motif...</option>
+                                <option value="SANTE">Problème de santé</option>
+                                <option value="DISCIPLINE">Problème de discipline</option>
+                                <option value="SORTIE">Autorisation de sortie</option>
+                                <option value="AUTRE">Autre raison</option>
+                              </select>
+                            ) : (
+                              <span className="text-slate-500">—</span>
+                            )}
+                          </td>
+                          <td className="p-3.5">
+                            {s.status !== 'PRESENT' ? (
+                              <input
+                                type="text"
+                                placeholder="Détail du motif (ex: Problème de santé, maux de tête)..."
+                                value={s.motif || ''}
+                                onChange={(e) => handleCourseMotifTextChange(s.student_id, e.target.value)}
+                                className="w-full px-2.5 py-1 bg-slate-800 border border-slate-700 rounded text-white text-[11px]"
+                              />
+                            ) : (
+                              <span className="text-slate-500">—</span>
+                            )}
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* 3. ALERTES & DISCORDANCES D'ASSIDUITÉ */}
+          {activeTab === 'alerts' && isSurveillantOrDirection && (
+            <div className="space-y-4">
+              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 flex items-center justify-between">
+                <div>
+                  <h3 className="font-bold text-sm text-white flex items-center space-x-2">
+                    <AlertTriangle className="w-4 h-4 text-amber-400" />
+                    <span>Tableau de Contrôle des Discordances d'Assiduité</span>
+                  </h3>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    Croisement automatique entre la feuille du surveillant (entrée/sortie) et les appels de cours des enseignants.
+                  </p>
+                </div>
+                <button
+                  onClick={loadAlerts}
+                  className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold transition cursor-pointer"
+                >
+                  {alertsLoading ? 'Analyse...' : 'Actualiser les Alertes'}
+                </button>
+              </div>
+
+              {alertsList.length === 0 ? (
+                <div className="bg-slate-900 border border-slate-800 rounded-2xl p-8 text-center space-y-2">
+                  <CheckCircle2 className="w-10 h-10 text-emerald-400 mx-auto" />
+                  <h4 className="text-sm font-bold text-white">Aucune discordance ou alerte détectée pour la date sélectionnée</h4>
+                  <p className="text-xs text-slate-400">Tous les appels de cours concordent avec le registre d'entrée du surveillant.</p>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {alertsList.map((alt, idx) => (
+                    <div
+                      key={alt.id || `alt-${idx}`}
+                      className={`p-4 rounded-2xl border space-y-2.5 text-xs shadow-md ${
+                        alt.type === 'STUDENT_LEFT'
+                          ? 'bg-amber-950/40 border-amber-800/80 text-amber-200'
+                          : alt.type === 'SUSPICIOUS_ABSENCE'
+                          ? 'bg-rose-950/40 border-rose-800/80 text-rose-200'
+                          : 'bg-indigo-950/40 border-indigo-800/80 text-indigo-200'
+                      }`}
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex items-center space-x-2 font-bold">
+                          {alt.type === 'STUDENT_LEFT' ? (
+                            <Clock className="w-4 h-4 text-amber-400 shrink-0" />
+                          ) : alt.type === 'SUSPICIOUS_ABSENCE' ? (
+                            <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+                          ) : (
+                            <FileText className="w-4 h-4 text-indigo-400 shrink-0" />
+                          )}
+                          <span>{alt.message}</span>
+                        </div>
+                        <span
+                          className={`px-2 py-0.5 rounded text-[10px] font-black uppercase ${
+                            alt.type === 'STUDENT_LEFT'
+                              ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                              : alt.type === 'SUSPICIOUS_ABSENCE'
+                              ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
+                              : 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/40'
+                          }`}
+                        >
+                          {alt.type === 'STUDENT_LEFT' ? 'Départ légitime' : alt.type === 'SUSPICIOUS_ABSENCE' ? 'Absence suspecte' : 'Appel manquant'}
+                        </span>
+                      </div>
+
+                      {alt.student_name && (
+                        <div className="font-semibold text-white">
+                          {alt.student_name} ({alt.class_name}) • Matr: {alt.matricule}
+                        </div>
+                      )}
+
+                      <div className="text-[11px] opacity-90">{alt.details}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
 
@@ -817,8 +1302,8 @@ export const AttendanceView: React.FC = () => {
                         </td>
                       </tr>
                     ) : (
-                      incidents.map((inc) => (
-                        <tr key={inc.id} className="hover:bg-slate-800/40">
+                      incidents.map((inc, idx) => (
+                        <tr key={inc.id ? `${inc.id}-${idx}` : `att-inc-${idx}`} className="hover:bg-slate-800/40">
                           <td className="p-3.5 font-mono text-slate-300">
                             <div>{inc.date}</div>
                             <div className="text-[10px] text-slate-500">{inc.time || '10:00'}</div>
@@ -938,15 +1423,15 @@ export const AttendanceView: React.FC = () => {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-800/60">
-                    {justificationsList.length === 0 ? (
+                    {(Array.isArray(justificationsList) ? justificationsList : []).length === 0 ? (
                       <tr>
                         <td colSpan={7} className="p-8 text-center text-slate-500">
                           Aucun justificatif d'absence n'a été déposé pour le moment.
                         </td>
                       </tr>
                     ) : (
-                      justificationsList.map((j) => (
-                        <tr key={j.id} className="hover:bg-slate-800/40">
+                      (Array.isArray(justificationsList) ? justificationsList : []).map((j: any, idx: number) => (
+                        <tr key={j.id ? `${j.id}-${idx}` : `att-j-${idx}`} className="hover:bg-slate-800/40">
                           <td className="p-3.5 font-bold text-white">
                             {j.first_name} {j.last_name}
                             <span className="block font-mono text-[10px] text-slate-400">
@@ -1073,13 +1558,22 @@ export const AttendanceView: React.FC = () => {
               />
             </div>
 
-            <div className="flex items-center space-x-2">
+            <div className="flex items-center space-x-2 no-print">
               <button
-                onClick={() => window.print()}
-                className="px-3.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs font-semibold flex items-center space-x-1.5 cursor-pointer no-print"
+                onClick={() => printDocument('printable-teacher-pointage-register', `Registre_Pointage_Enseignants_${teacherPointageDate}`)}
+                className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 rounded-lg text-xs font-semibold flex items-center space-x-1.5 cursor-pointer"
+                title="Imprimer le registre du jour"
               >
                 <Printer className="w-3.5 h-3.5" />
-                <span>Imprimer Registre du Jour</span>
+                <span>Imprimer</span>
+              </button>
+              <button
+                onClick={() => downloadPdf('printable-teacher-pointage-register', `Registre_Pointage_Enseignants_${teacherPointageDate}.pdf`)}
+                className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-semibold flex items-center space-x-1.5 cursor-pointer shadow"
+                title="Télécharger le registre du jour en PDF"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>Télécharger PDF</span>
               </button>
 
               {user?.role === 'PROMOTEUR' ? (
@@ -1125,7 +1619,12 @@ export const AttendanceView: React.FC = () => {
           </div>
 
           {/* Registre des pointages enseignants avec les 20 champs complets */}
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-sm overflow-x-auto">
+          <div id="printable-teacher-pointage-register" className="printable-document bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-sm overflow-x-auto p-4">
+            <PrintHeader
+              establishment={establishment}
+              title="REGISTRE DU POINTAGE DES ENSEIGNANTS"
+              subtitle={`Date d'émargement : ${teacherPointageDate} • Édité le ${new Date().toLocaleDateString('fr-FR')}`}
+            />
             <table className="w-full text-left text-xs text-slate-300 min-w-[1000px]">
               <thead className="bg-slate-800/60 text-slate-400 uppercase tracking-wider text-[10px] border-b border-slate-800">
                 <tr>
@@ -1148,7 +1647,7 @@ export const AttendanceView: React.FC = () => {
                     </td>
                   </tr>
                 ) : (
-                  teacherAttendances.map((ta) => {
+                  teacherAttendances.map((ta, idx) => {
                     const statusBadge = {
                       PRESENT: 'bg-emerald-950 text-emerald-300 border-emerald-500/40',
                       ABSENT: 'bg-rose-950 text-rose-300 border-rose-500/40',
@@ -1167,7 +1666,7 @@ export const AttendanceView: React.FC = () => {
                     const isMyPointage = user?.id === ta.teacher_id;
 
                     return (
-                      <tr key={ta.id} className="hover:bg-slate-800/40">
+                      <tr key={ta.id ? `${ta.id}-${idx}` : `ta-${idx}`} className="hover:bg-slate-800/40">
                         <td className="p-3.5 font-bold text-white">
                           {ta.teacher_name}
                           <span className="block font-mono text-[10px] text-slate-400">
@@ -1355,8 +1854,8 @@ export const AttendanceView: React.FC = () => {
                     </td>
                   </tr>
                 ) : (
-                  complaints.map((c) => (
-                    <tr key={c.id} className="hover:bg-slate-800/40">
+                  complaints.map((c: any, idx: number) => (
+                    <tr key={c.id ? `${c.id}-${idx}` : `complaint-${idx}`} className="hover:bg-slate-800/40">
                       <td className="p-3.5 font-mono font-bold text-indigo-400">{c.complaint_number}</td>
                       <td className="p-3.5 text-slate-400">{c.date}</td>
                       <td className="p-3.5 font-bold text-white">
@@ -1460,19 +1959,35 @@ export const AttendanceView: React.FC = () => {
               </p>
             </div>
 
-            <button
-              onClick={() => window.print()}
-              className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white rounded-xl text-xs font-semibold flex items-center space-x-1.5 shadow-sm cursor-pointer no-print"
-            >
-              <Printer className="w-4 h-4" />
-              <span>Imprimer le Rapport Mensuel</span>
-            </button>
+            <div className="flex items-center space-x-2 no-print">
+              <button
+                onClick={() => printDocument('printable-attendance-reports', 'Rapport_Presence_Enseignants')}
+                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white border border-slate-700 rounded-xl text-xs font-semibold flex items-center space-x-1.5 shadow-sm cursor-pointer"
+                title="Imprimer le rapport mensuel"
+              >
+                <Printer className="w-4 h-4" />
+                <span>Imprimer</span>
+              </button>
+              <button
+                onClick={() => downloadPdf('printable-attendance-reports', 'Rapport_Presence_Enseignants.pdf')}
+                className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-semibold flex items-center space-x-1.5 shadow-sm cursor-pointer"
+                title="Télécharger le rapport mensuel en PDF"
+              >
+                <Download className="w-4 h-4" />
+                <span>Télécharger PDF</span>
+              </button>
+            </div>
           </div>
 
           {reportsLoading ? (
             <div className="p-8 text-center text-slate-400">Génération des rapports en cours...</div>
           ) : reportsData ? (
-            <div className="space-y-6">
+            <div id="printable-attendance-reports" className="printable-document space-y-6 bg-slate-900 p-4 rounded-2xl border border-slate-800">
+              <PrintHeader
+                establishment={establishment}
+                title="RAPPORT ANALYTIQUE DE PRÉSENCE DES ENSEIGNANTS"
+                subtitle={`Synthèse d'assiduité et bilan horaire • Édité le ${new Date().toLocaleDateString('fr-FR')}`}
+              />
               {/* Cartes KPI */}
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
                 <div className="bg-slate-900 border border-slate-800 p-4 rounded-2xl">
@@ -1519,8 +2034,8 @@ export const AttendanceView: React.FC = () => {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-800/60">
-                    {reportsData.monthlyByTeacher.map((t: any) => (
-                      <tr key={t.teacher_id} className="hover:bg-slate-800/40">
+                    {reportsData.monthlyByTeacher.map((t: any, idx: number) => (
+                      <tr key={t.teacher_id ? `${t.teacher_id}-${idx}` : `rep-teach-${idx}`} className="hover:bg-slate-800/40">
                         <td className="p-3.5 font-bold text-white">{t.teacher_name}</td>
                         <td className="p-3.5 text-center font-mono">{t.sessions_count}</td>
                         <td className="p-3.5 text-center font-mono text-slate-400">{t.total_scheduled}h</td>
@@ -1658,7 +2173,7 @@ export const AttendanceView: React.FC = () => {
                     <input
                       type="number"
                       min={0}
-                      step={100}
+                      step="any"
                       value={rulesForm.absenceDeductionRatePerHour}
                       onChange={(e) => setRulesForm({ ...rulesForm, absenceDeductionRatePerHour: parseFloat(e.target.value) || 0 })}
                       disabled={user?.role !== 'PROMOTEUR' && user?.role !== 'DIRECTEUR_GENERAL'}
@@ -1677,7 +2192,7 @@ export const AttendanceView: React.FC = () => {
                     <input
                       type="number"
                       min={0}
-                      step={100}
+                      step="any"
                       value={rulesForm.overtimeHourlyBonus}
                       onChange={(e) => setRulesForm({ ...rulesForm, overtimeHourlyBonus: parseFloat(e.target.value) || 0 })}
                       disabled={user?.role !== 'PROMOTEUR' && user?.role !== 'DIRECTEUR_GENERAL'}
@@ -1917,7 +2432,7 @@ export const AttendanceView: React.FC = () => {
                   <label className="block text-slate-300 mb-1 font-semibold">Heures Prévues</label>
                   <input
                     type="number"
-                    step="0.5"
+                    step="any"
                     min="0"
                     value={teacherPointageForm.scheduledHours}
                     onChange={(e) => setTeacherPointageForm({ ...teacherPointageForm, scheduledHours: Number(e.target.value) })}
@@ -1929,7 +2444,7 @@ export const AttendanceView: React.FC = () => {
                   <label className="block text-slate-300 mb-1 font-semibold">H. Présence</label>
                   <input
                     type="number"
-                    step="0.5"
+                    step="any"
                     min="0"
                     value={teacherPointageForm.presenceHours}
                     onChange={(e) => setTeacherPointageForm({ ...teacherPointageForm, presenceHours: Number(e.target.value) })}
@@ -1941,7 +2456,7 @@ export const AttendanceView: React.FC = () => {
                   <label className="block text-slate-300 mb-1 font-semibold text-emerald-400">Cours Dispensés</label>
                   <input
                     type="number"
-                    step="0.5"
+                    step="any"
                     min="0"
                     value={teacherPointageForm.taughtHours}
                     onChange={(e) => {
@@ -2066,7 +2581,7 @@ export const AttendanceView: React.FC = () => {
                   <label className="block text-slate-300 mb-1 font-semibold">Heures Effectuées</label>
                   <input
                     type="number"
-                    step="0.5"
+                    step="any"
                     min="0"
                     value={correctionForm.hoursDone}
                     onChange={(e) => setCorrectionForm({ ...correctionForm, hoursDone: Number(e.target.value) })}
@@ -2682,6 +3197,73 @@ export const AttendanceView: React.FC = () => {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL FEUILLE D'ÉMARGEMENT / D'APPEL OFFICIELLE PERSONNALISÉE */}
+      {showPrintSheetModal && (
+        <div className="fixed inset-0 bg-slate-950/85 backdrop-blur-xs flex items-center justify-center p-4 z-50 overflow-y-auto">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-4xl p-6 shadow-2xl my-8 flex flex-col max-h-[92vh]">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800 no-print">
+              <h3 className="text-base font-bold text-white flex items-center space-x-2">
+                <FileText className="w-4 h-4 text-emerald-400" />
+                <span>Feuille d'Émargement Officielle ({classes.find(c => c.id === selectedClassId)?.name || 'Classe'})</span>
+              </h3>
+              <div className="flex items-center space-x-2">
+                <button
+                  type="button"
+                  onClick={() =>
+                    downloadPdf(
+                      'printable-attendance-sheet',
+                      `Feuille_Appel_${classes.find(c => c.id === selectedClassId)?.name || 'classe'}_${selectedDate}.pdf`
+                    )
+                  }
+                  className="px-3.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-xl text-xs font-semibold flex items-center space-x-1.5 cursor-pointer"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>Télécharger PDF</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    printDocument(
+                      'printable-attendance-sheet',
+                      `Feuille_Appel_${classes.find(c => c.id === selectedClassId)?.name || 'classe'}_${selectedDate}`
+                    )
+                  }
+                  className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold flex items-center space-x-1.5 shadow cursor-pointer"
+                >
+                  <Printer className="w-3.5 h-3.5" />
+                  <span>Imprimer Feuille d'Appel</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowPrintSheetModal(false)}
+                  className="p-1.5 text-slate-400 hover:text-white rounded-lg cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+
+            <div id="printable-attendance-sheet" className="printable-document bg-white rounded-xl overflow-y-auto flex-1 my-4 border border-slate-200 shadow-md">
+              <CustomizableAttendanceSheet
+                classNameTitle={classes.find(c => c.id === selectedClassId)?.name || 'Classe'}
+                dateStr={new Date(selectedDate).toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}
+                sessionTitle="Appel Général de l'Établissement"
+                rows={attendanceRecords.map(r => ({
+                  student_id: r.student_id,
+                  matricule: r.matricule,
+                  name: `${r.last_name || ''} ${r.first_name || ''}`,
+                  status: r.status,
+                  arrival_time: r.arrival_time,
+                  departure_time: r.departure_time,
+                  motif: r.motif,
+                }))}
+                establishment={establishment}
+              />
+            </div>
           </div>
         </div>
       )}

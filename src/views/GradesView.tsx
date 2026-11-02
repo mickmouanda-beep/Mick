@@ -13,11 +13,14 @@ import {
   X,
   FileSpreadsheet,
   TrendingUp,
+  Download,
 } from 'lucide-react';
 import { api } from '../lib/api.ts';
 import { useAuth } from '../context/AuthContext.tsx';
 import { Evaluation, SchoolClass, Subject } from '../types.ts';
 import { PrintableReportCard } from '../components/PrintableReportCard.tsx';
+import { CloseButton } from '../components/CloseButton.tsx';
+import { printDocument, downloadPdf } from '../utils/printPdfUtils.ts';
 
 export const GradesView: React.FC = () => {
   const { establishment, hasRole, user } = useAuth();
@@ -53,6 +56,7 @@ export const GradesView: React.FC = () => {
 
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const [publishing, setPublishing] = useState(false);
 
   const canLock = hasRole(['PROMOTEUR', 'DIRECTEUR_GENERAL', 'DIRECTEUR_ETUDES']);
 
@@ -81,6 +85,31 @@ export const GradesView: React.FC = () => {
   useEffect(() => {
     loadData();
   }, [filterClassId, filterSubjectId, filterTerm]);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        if (selectedStudentForCard) setSelectedStudentForCard(null);
+        else if (showReportCardModal) setShowReportCardModal(false);
+        else if (activeEvalForGrading) setActiveEvalForGrading(null);
+        else if (showCreateModal) setShowCreateModal(false);
+      }
+    };
+
+    const handlePopState = () => {
+      if (selectedStudentForCard) setSelectedStudentForCard(null);
+      else if (showReportCardModal) setShowReportCardModal(false);
+      else if (activeEvalForGrading) setActiveEvalForGrading(null);
+      else if (showCreateModal) setShowCreateModal(false);
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('popstate', handlePopState);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('popstate', handlePopState);
+    };
+  }, [selectedStudentForCard, showReportCardModal, activeEvalForGrading, showCreateModal]);
 
   const handleCreateEval = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -177,6 +206,25 @@ export const GradesView: React.FC = () => {
       setError(err.message || 'Impossible de calculer les bulletins de notes.');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handlePublishReportCards = async () => {
+    if (!reportCardData?.class?.id || !reportCardData?.reports?.length) return;
+    setPublishing(true);
+    setError(null);
+    try {
+      const res = await api.publishReportCards({
+        classId: reportCardData.class.id,
+        term: reportCardData.term,
+        reports: reportCardData.reports,
+        academicYear: reportCardData.establishment?.academic_year || '2026-2027',
+      });
+      setSuccess(res.message || 'Bulletins officiels validés et publiés dans Firestore avec succès.');
+    } catch (err: any) {
+      setError(err.message || 'Erreur lors de la publication des bulletins.');
+    } finally {
+      setPublishing(false);
     }
   };
 
@@ -302,8 +350,8 @@ export const GradesView: React.FC = () => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800/60">
-                {evaluations.map((ev) => (
-                  <tr key={ev.id} className="hover:bg-slate-800/40 transition">
+                {evaluations.map((ev, idx) => (
+                  <tr key={ev.id ? `${ev.id}-${idx}` : `eval-${idx}`} className="hover:bg-slate-800/40 transition">
                     <td className="p-3.5">
                       <span className="font-bold text-white block">{ev.title}</span>
                       <span className="text-[10px] text-slate-500 font-mono">{ev.date}</span>
@@ -474,8 +522,8 @@ export const GradesView: React.FC = () => {
                   <label className="block text-slate-300 mb-1 font-semibold">Note Max (sur)</label>
                   <input
                     type="number"
-                    step="1"
-                    min="1"
+                    step="any"
+                    min="0"
                     value={newMaxScore}
                     onChange={(e) => setNewMaxScore(Number(e.target.value))}
                     className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white"
@@ -485,8 +533,8 @@ export const GradesView: React.FC = () => {
                   <label className="block text-slate-300 mb-1 font-semibold">Coefficient</label>
                   <input
                     type="number"
-                    step="0.5"
-                    min="1"
+                    step="any"
+                    min="0"
                     value={newCoef}
                     onChange={(e) => setNewCoef(Number(e.target.value))}
                     className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white"
@@ -551,8 +599,8 @@ export const GradesView: React.FC = () => {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-800">
-                    {gradingStudents.map((st) => (
-                      <tr key={st.student_id} className="hover:bg-slate-800/30">
+                    {gradingStudents.map((st, idx) => (
+                      <tr key={st.student_id ? `${st.student_id}-${idx}` : `grading-${idx}`} className="hover:bg-slate-800/30">
                         <td className="p-3 font-mono font-bold text-amber-400">{st.matricule}</td>
                         <td className="p-3 font-semibold text-white">
                           {st.last_name} {st.first_name} {st.post_name || ''}
@@ -560,7 +608,7 @@ export const GradesView: React.FC = () => {
                         <td className="p-3">
                           <input
                             type="number"
-                            step="0.25"
+                            step="any"
                             min="0"
                             max={activeEvalForGrading.max_score}
                             disabled={st.is_absent}
@@ -659,22 +707,44 @@ export const GradesView: React.FC = () => {
                   >
                     ← Retour à la liste de classe
                   </button>
-                  <button
-                    onClick={() => window.print()}
-                    className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-semibold flex items-center space-x-1.5 shadow"
-                  >
-                    <Printer className="w-3.5 h-3.5" />
-                    <span>Imprimer ce Bulletin</span>
-                  </button>
+                  <div className="flex items-center space-x-2 no-print">
+                    <button
+                      onClick={() =>
+                        downloadPdf(
+                          'printable-report-card-single',
+                          `Bulletin_${selectedStudentForCard.student.matricule || 'eleve'}_${reportCardData.term}.pdf`
+                        )
+                      }
+                      className="px-3.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-lg text-xs font-semibold flex items-center space-x-1.5 transition cursor-pointer"
+                      title="Télécharger en PDF"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      <span>Télécharger PDF</span>
+                    </button>
+                    <button
+                      onClick={() =>
+                        printDocument(
+                          'printable-report-card-single',
+                          `Bulletin_${selectedStudentForCard.student.matricule}`
+                        )
+                      }
+                      className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-semibold flex items-center space-x-1.5 shadow cursor-pointer"
+                    >
+                      <Printer className="w-3.5 h-3.5" />
+                      <span>Imprimer ce Bulletin</span>
+                    </button>
+                  </div>
                 </div>
 
-                <PrintableReportCard
-                  report={selectedStudentForCard}
-                  establishment={reportCardData.establishment}
-                  schoolClass={reportCardData.class}
-                  term={reportCardData.term}
-                  classAverage={reportCardData.classAverage}
-                />
+                <div id="printable-report-card-single">
+                  <PrintableReportCard
+                    report={selectedStudentForCard}
+                    establishment={reportCardData.establishment}
+                    schoolClass={reportCardData.class}
+                    term={reportCardData.term}
+                    classAverage={reportCardData.classAverage}
+                  />
+                </div>
               </div>
             ) : (
               <div className="space-y-4 pt-4 text-xs">
@@ -692,8 +762,8 @@ export const GradesView: React.FC = () => {
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-800">
-                      {reportCardData.reports.map((r: any) => (
-                        <tr key={r.student.id} className="hover:bg-slate-800/40">
+                      {reportCardData.reports.map((r: any, idx: number) => (
+                        <tr key={r.student?.id ? `${r.student.id}-${idx}` : `report-${idx}`} className="hover:bg-slate-800/40">
                           <td className="p-3 font-bold text-amber-400">
                             {r.rank ? `${r.rank}e` : '-'}
                           </td>
@@ -724,10 +794,19 @@ export const GradesView: React.FC = () => {
                   </table>
                 </div>
 
-                <div className="flex justify-end pt-3 border-t border-slate-800">
+                <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-3 border-t border-slate-800 no-print">
                   <button
-                    onClick={() => window.print()}
-                    className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl font-semibold flex items-center space-x-1.5 shadow"
+                    onClick={handlePublishReportCards}
+                    disabled={publishing}
+                    className="w-full sm:w-auto px-4 py-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white rounded-xl font-semibold flex items-center justify-center space-x-1.5 shadow cursor-pointer transition"
+                  >
+                    <CheckCircle2 className="w-4 h-4" />
+                    <span>{publishing ? 'Publication en cours...' : 'Valider & Publier Officiellement les Bulletins (Firestore)'}</span>
+                  </button>
+
+                  <button
+                    onClick={() => printDocument(document.querySelector('.printable-document') || document.body, `Bulletins_Classe_${reportCardData.class?.name || 'classe'}`)}
+                    className="w-full sm:w-auto px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl font-semibold flex items-center justify-center space-x-1.5 shadow cursor-pointer"
                   >
                     <Printer className="w-4 h-4" />
                     <span>Imprimer Tous les Bulletins de la Classe</span>

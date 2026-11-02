@@ -402,8 +402,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
                       </td>
                     </tr>
                   ) : (
-                    classesList.map((c) => (
-                      <tr key={c.id} className="hover:bg-slate-800/40">
+                    classesList.map((c, idx) => (
+                      <tr key={c.id ? `${c.id}-${idx}` : `dash-cls-${idx}`} className="hover:bg-slate-800/40">
                         <td className="p-3 font-bold text-white">{c.name}</td>
                         <td className="p-3">{c.cycle_code} - {c.level_code}</td>
                         <td className="p-3 font-mono text-indigo-400">{c.serie_code || '-'}</td>
@@ -506,12 +506,26 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
               <span className="text-[11px] text-slate-500">Élèves reconduits</span>
             </div>
             <div className="bg-slate-900 border border-slate-800 p-4 rounded-2xl">
-              <span className="text-xs text-slate-400">Caisse Scolarité</span>
-              <p className="text-2xl font-black text-teal-400 mt-1 font-mono">
-                {(stats?.financialStats?.totalCollected || 0).toLocaleString()} <span className="text-xs">FCFA</span>
+              <span className="text-xs text-slate-400 block font-medium">Recettes Scolarité Encaissées</span>
+              <p className="text-xl font-black text-teal-400 mt-1 font-mono">
+                {(stats?.financialStats?.totalCollected || 0).toLocaleString()} <span className="text-xs font-normal">FCFA</span>
               </p>
-              <button onClick={() => onNavigate('finance')} className="text-[11px] text-teal-400 hover:underline mt-1">
-                Encaisser & imprimer reçus →
+              <div className="text-[11px] text-slate-400 mt-2 space-y-1 border-t border-slate-800/80 pt-1.5">
+                <div className="flex justify-between">
+                  <span>Aujourd'hui:</span>
+                  <strong className="text-emerald-400 font-mono">{(stats?.financialStats?.todayCollected || 0).toLocaleString()} F</strong>
+                </div>
+                <div className="flex justify-between">
+                  <span>Ce mois:</span>
+                  <strong className="text-teal-300 font-mono">{(stats?.financialStats?.monthCollected || 0).toLocaleString()} F</strong>
+                </div>
+                <div className="flex justify-between">
+                  <span>Cette année:</span>
+                  <strong className="text-indigo-300 font-mono">{(stats?.financialStats?.yearCollected || 0).toLocaleString()} F</strong>
+                </div>
+              </div>
+              <button onClick={() => onNavigate('finance')} className="text-[11px] text-teal-400 hover:underline mt-2 font-semibold flex items-center space-x-1">
+                <span>Encaisser & imprimer reçus →</span>
               </button>
             </div>
           </div>
@@ -699,9 +713,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
 
               {stats?.teacherSpecific?.classesList && stats.teacherSpecific.classesList.length > 0 ? (
                 <div className="space-y-2">
-                  {stats.teacherSpecific.classesList.map((c: any) => (
+                  {stats.teacherSpecific.classesList.map((c: any, idx: number) => (
                     <div
-                      key={c.id}
+                      key={c.id ? `${c.id}-${idx}` : `dash-teach-cls-${idx}`}
                       className="p-3 bg-slate-950 rounded-xl border border-slate-800 flex items-center justify-between"
                     >
                       <div>
@@ -751,9 +765,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
 
               {stats?.teacherSpecific?.recentAttendances && stats.teacherSpecific.recentAttendances.length > 0 ? (
                 <div className="space-y-2">
-                  {stats.teacherSpecific.recentAttendances.slice(0, 4).map((att: any) => (
+                  {stats.teacherSpecific.recentAttendances.slice(0, 4).map((att: any, idx: number) => (
                     <div
-                      key={att.id}
+                      key={att.id ? `${att.id}-${idx}` : `dash-att-${idx}`}
                       className="p-2.5 bg-slate-950 rounded-xl border border-slate-800 flex items-center justify-between text-xs"
                     >
                       <div>
@@ -799,8 +813,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
                 <span>Observations Officielles de la Direction des Études sur vos Leçons</span>
               </h3>
               <div className="space-y-2">
-                {stats.teacherSpecific.receivedObservations.map((obs: any) => (
-                  <div key={obs.id} className="p-3 bg-slate-950 rounded-xl border border-slate-800 text-xs space-y-1">
+                {stats.teacherSpecific.receivedObservations.map((obs: any, idx: number) => (
+                  <div key={obs.id ? `${obs.id}-${idx}` : `dash-obs-${idx}`} className="p-3 bg-slate-950 rounded-xl border border-slate-800 text-xs space-y-1">
                     <div className="flex justify-between font-bold text-white">
                       <span>Leçon : {obs.lesson_title}</span>
                       <span className="text-[10px] text-slate-400 font-mono">{obs.date}</span>
@@ -835,7 +849,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
 
         {stats?.cycleDistribution && stats.cycleDistribution.length > 0 ? (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            {stats.cycleDistribution.map((item: any) => {
+            {stats.cycleDistribution.map((item: any, idx: number) => {
               const total = stats.totalStudents || 1;
               const pct = Math.round((item.count / total) * 100);
               const cycleNames: Record<string, string> = {
@@ -845,7 +859,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onNavigate }) => {
                 LYCEE: 'Lycée (2nde-Tle)',
               };
               return (
-                <div key={item.cycle_code} className="p-4 bg-slate-950 rounded-xl border border-slate-800 space-y-2">
+                <div key={item.cycle_code ? `${item.cycle_code}-${idx}` : `cyc-${idx}`} className="p-4 bg-slate-950 rounded-xl border border-slate-800 space-y-2">
                   <div className="flex justify-between items-center text-xs">
                     <span className="font-semibold text-slate-200">{cycleNames[item.cycle_code] || item.cycle_code}</span>
                     <span className="font-bold text-indigo-400">{item.count}</span>

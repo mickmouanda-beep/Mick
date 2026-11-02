@@ -38,14 +38,9 @@ export async function getDb(): Promise<Database> {
   initSchema(dbInstance);
   saveDb();
 
-  // Hydrater SQLite depuis Cloud Firestore en arrière-plan sans bloquer le démarrage HTTP
-  hydrateSqliteFromFirestore(dbInstance)
-    .then(() => {
-      console.log('[getDb] Hydratation Firestore -> SQLite terminée.');
-    })
-    .catch((err) => {
-      console.error('[getDb] Avertissement hydratation SQLite depuis Firestore:', err);
-    });
+  // DÉSACTIVÉ AU DÉMARRAGE : Aucun seed ou hydratation automatique au démarrage.
+  // SQLite reste en lecture seule, uniquement comme source de la migration.
+  console.log('[getDb] SQLite initialisé en lecture seule pour la migration. Hydratation automatique désactivée.');
 
   return dbInstance;
 }
@@ -64,6 +59,9 @@ export function saveDb(): void {
 function initSchema(db: Database): void {
   try {
     db.run("ALTER TABLE payments ADD COLUMN payment_type TEXT DEFAULT 'FRAIS_MENSUELS';");
+  } catch {}
+  try {
+    db.run("ALTER TABLE staff_salary_parameters ADD COLUMN teaching_level TEXT;");
   } catch {}
 
   db.run(`
@@ -574,6 +572,10 @@ function initSchema(db: Database): void {
     // Colonne déjà existante
   }
 
+  try {
+    db.run('ALTER TABLE payments ADD COLUMN payment_date TEXT;');
+  } catch {}
+
   // Support des emplois du temps multi-établissements et métadonnées matières
   try {
     db.run('ALTER TABLE teacher_schedules ADD COLUMN establishment_id TEXT;');
@@ -923,8 +925,9 @@ function initSchema(db: Database): void {
       establishment_id TEXT NOT NULL,
       user_id TEXT NOT NULL,
       wage_type TEXT NOT NULL DEFAULT 'MENSUEL_FIXE', -- 'MENSUEL_FIXE', 'HORAIRE'
-      base_salary REAL NOT NULL DEFAULT 150000,
-      hourly_rate REAL NOT NULL DEFAULT 3500,
+      teaching_level TEXT, -- 'PRESCOLAIRE', 'PRIMAIRE', 'COLLEGE', 'LYCEE'
+      base_salary REAL NOT NULL DEFAULT 0,
+      hourly_rate REAL NOT NULL DEFAULT 0,
       transport_allowance REAL NOT NULL DEFAULT 20000,
       responsibility_bonus REAL NOT NULL DEFAULT 0,
       seniority_bonus REAL NOT NULL DEFAULT 0,
@@ -936,47 +939,138 @@ function initSchema(db: Database): void {
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
       UNIQUE(establishment_id, user_id)
     );
+
+    -- Référentiel programmes et manuels scolaires (D.E & Enseignants)
+    CREATE TABLE IF NOT EXISTS curriculum_programs (
+      id TEXT PRIMARY KEY,
+      establishment_id TEXT NOT NULL,
+      title TEXT NOT NULL,
+      subject_id TEXT,
+      subject_name TEXT NOT NULL,
+      class_id TEXT,
+      class_name TEXT NOT NULL,
+      academic_year TEXT NOT NULL,
+      file_name TEXT NOT NULL,
+      file_type TEXT NOT NULL,
+      file_size INTEGER NOT NULL,
+      file_path TEXT NOT NULL,
+      file_data TEXT,
+      uploaded_by_id TEXT NOT NULL,
+      uploaded_by_name TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (establishment_id) REFERENCES establishments(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_curriculum_programs_est ON curriculum_programs(establishment_id);
+
+    -- Suivi des dossiers d'examen (BEPC & BAC) - Direction des Études
+    CREATE TABLE IF NOT EXISTS exam_configurations (
+      id TEXT PRIMARY KEY,
+      establishment_id TEXT NOT NULL,
+      academic_year TEXT NOT NULL,
+      exam_type TEXT NOT NULL, -- 'BEPC', 'BAC'
+      exam_name TEXT NOT NULL,
+      deadline TEXT,
+      required_documents TEXT NOT NULL, -- JSON
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (establishment_id) REFERENCES establishments(id) ON DELETE CASCADE,
+      UNIQUE(establishment_id, academic_year, exam_type)
+    );
+
+    CREATE TABLE IF NOT EXISTS exam_candidates (
+      id TEXT PRIMARY KEY,
+      establishment_id TEXT NOT NULL,
+      academic_year TEXT NOT NULL,
+      exam_type TEXT NOT NULL, -- 'BEPC', 'BAC'
+      student_id TEXT NOT NULL,
+      class_id TEXT NOT NULL,
+      serie_code TEXT,
+      is_retained INTEGER NOT NULL DEFAULT 1,
+      checklist TEXT NOT NULL DEFAULT '{}',
+      status TEXT NOT NULL DEFAULT 'INCOMPLET', -- 'COMPLET', 'INCOMPLET'
+      documents_received_count INTEGER NOT NULL DEFAULT 0,
+      documents_total_count INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (establishment_id) REFERENCES establishments(id) ON DELETE CASCADE,
+      FOREIGN KEY (student_id) REFERENCES students(id) ON DELETE CASCADE,
+      UNIQUE(establishment_id, academic_year, exam_type, student_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_exam_candidates_est ON exam_candidates(establishment_id, exam_type);
+
+    CREATE TABLE IF NOT EXISTS exam_dossier_logs (
+      id TEXT PRIMARY KEY,
+      establishment_id TEXT NOT NULL,
+      candidate_id TEXT NOT NULL,
+      student_id TEXT NOT NULL,
+      exam_type TEXT NOT NULL,
+      doc_id TEXT NOT NULL,
+      doc_name TEXT NOT NULL,
+      action TEXT NOT NULL, -- 'CHECKED', 'UNCHECKED'
+      user_id TEXT NOT NULL,
+      user_name TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (establishment_id) REFERENCES establishments(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_exam_logs_cand ON exam_dossier_logs(candidate_id);
+
+    CREATE TABLE IF NOT EXISTS exam_notification_logs (
+      id TEXT PRIMARY KEY,
+      establishment_id TEXT NOT NULL,
+      candidate_id TEXT NOT NULL,
+      student_id TEXT NOT NULL,
+      recipient_name TEXT NOT NULL,
+      recipient_phone TEXT,
+      channel TEXT NOT NULL DEFAULT 'WHATSAPP',
+      message TEXT NOT NULL,
+      sent_by_id TEXT NOT NULL,
+      sent_by_name TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (establishment_id) REFERENCES establishments(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_exam_notifs_cand ON exam_notification_logs(candidate_id);
   `);
 
-  // Seeder le référentiel national congolais officiel (Lycée et Collège)
+  // Safe migration for exam_configurations if deadline was previously created NOT NULL in SQLite
   try {
-    for (const serie of CONGO_SERIES_CATALOG) {
-      const id = `REF-${serie.code}`;
-      const subjectsJson = JSON.stringify(serie.subjects);
-      db.run(
-        `INSERT OR IGNORE INTO pedagogical_references (id, cycle_code, level_code, serie_code, specialty_name, description, validation_status, source_title, source_url, subjects_json)
-         VALUES (?, 'LYCEE', 'Terminale', ?, ?, ?, ?, ?, ?, ?)`,
-        [id, serie.code, serie.name, serie.description, serie.validationStatus, serie.sourceTitle, serie.sourceUrl, subjectsJson]
-      );
+    const stmt = db.prepare("PRAGMA table_info(exam_configurations);");
+    let isDeadlineNotNull = false;
+    while (stmt.step()) {
+      const col = stmt.getAsObject();
+      if (col.name === 'deadline' && col.notnull === 1) {
+        isDeadlineNotNull = true;
+        break;
+      }
     }
-    for (const col of CONGO_COLLEGE_CATALOG) {
-      const id = `REF-COL-${col.code}`;
-      const subjectsJson = JSON.stringify(col.subjects);
-      db.run(
-        `INSERT OR IGNORE INTO pedagogical_references (id, cycle_code, level_code, serie_code, specialty_name, description, validation_status, source_title, source_url, subjects_json)
-         VALUES (?, 'COLLEGE', ?, NULL, ?, ?, ?, ?, ?, ?)`,
-        [id, col.levelName, col.name, col.description, col.validationStatus, col.sourceTitle, col.sourceUrl, subjectsJson]
-      );
-    }
-  } catch (err) {
-    console.error("Erreur initialisation référentiel national:", err);
-  }
+    stmt.free();
 
-  // Seeder les 3 formules officielles si absentes
-  try {
-    const existing = db.exec("SELECT COUNT(*) as c FROM commercial_formulas");
-    const count = existing[0]?.values[0]?.[0] || 0;
-    if (count === 0) {
+    if (isDeadlineNotNull) {
       db.run(`
-        INSERT INTO commercial_formulas (id, name, subtitle, max_students, max_staff, duration_months, price_fcfa, modules_included)
-        VALUES 
-        ('EXCELLENCE', 'Formule Excellence — Illimité', 'Plafond effectif jusqu''à 1 500 élèves et 150 membres du personnel', 1500, 150, 12, NULL, '["SCOLARITE","NOTES","PAIE","FINANCE","SURVEILLANCE","CAHIER_TEXTE","DECISIONS"]'),
-        ('PACK_MOYEN', 'Formule Pack Moyen', 'Plafond effectif jusqu''à 700 élèves et 80 membres du personnel', 700, 80, 12, NULL, '["SCOLARITE","NOTES","FINANCE","SURVEILLANCE","CAHIER_TEXTE"]'),
-        ('START', 'Formule Start', 'Plafond effectif jusqu''à 400 élèves et 50 membres du personnel', 400, 50, 12, NULL, '["SCOLARITE","NOTES","FINANCE"]');
+        CREATE TABLE IF NOT EXISTS exam_configurations_migration (
+          id TEXT PRIMARY KEY,
+          establishment_id TEXT NOT NULL,
+          academic_year TEXT NOT NULL,
+          exam_type TEXT NOT NULL,
+          exam_name TEXT NOT NULL,
+          deadline TEXT,
+          required_documents TEXT NOT NULL,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (establishment_id) REFERENCES establishments(id) ON DELETE CASCADE,
+          UNIQUE(establishment_id, academic_year, exam_type)
+        );
       `);
+      db.run(`INSERT OR IGNORE INTO exam_configurations_migration SELECT * FROM exam_configurations;`);
+      db.run(`DROP TABLE exam_configurations;`);
+      db.run(`ALTER TABLE exam_configurations_migration RENAME TO exam_configurations;`);
     }
-  } catch (err) {
-    console.error("Erreur initialisation formules commerciales:", err);
+  } catch (migErr) {
+    console.warn('[initSchema] Migration exam_configurations:', migErr);
   }
 }
 

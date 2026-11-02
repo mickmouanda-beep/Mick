@@ -16,6 +16,8 @@ import {
   GraduationCap,
   Terminal,
   CalendarDays,
+  BookMarked,
+  ClipboardCheck,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext.tsx';
 import { UserRole } from '../types.ts';
@@ -26,6 +28,8 @@ export type ActiveTab =
   | 'parent-space'
   | 'academic'
   | 'students'
+  | 'exam-dossiers'
+  | 'curriculum-programs'
   | 'lessons'
   | 'teachers'
   | 'schedules'
@@ -33,6 +37,7 @@ export type ActiveTab =
   | 'attendance'
   | 'finance'
   | 'payroll'
+  | 'contracts-salaries'
   | 'decisions'
   | 'admin'
   | 'commercial'
@@ -65,14 +70,14 @@ const NAV_ITEMS: NavItem[] = [
     id: 'student-space',
     label: 'Mon Espace Élève',
     icon: GraduationCap,
-    allowedRoles: ['ELEVE', 'PROMOTEUR', 'DIRECTEUR_GENERAL', 'DIRECTEUR_ETUDES', 'SURVEILLANT'],
+    allowedRoles: ['ELEVE'],
     description: 'Notes, bulletins, devoirs, emploi du temps & présences',
   },
   {
     id: 'parent-space',
     label: 'Espace Parents & Tuteurs',
     icon: Users,
-    allowedRoles: ['PARENT', 'PROMOTEUR', 'DIRECTEUR_GENERAL', 'DIRECTEUR_ETUDES'],
+    allowedRoles: ['PARENT'],
     description: 'Suivi multi-enfants, scolarité, justificatifs & requêtes',
   },
   {
@@ -90,6 +95,20 @@ const NAV_ITEMS: NavItem[] = [
     description: 'Inscriptions, pièces, photos & fiches',
   },
   {
+    id: 'curriculum-programs',
+    label: 'Référentiel programmes',
+    icon: BookMarked,
+    allowedRoles: ['PROMOTEUR', 'DIRECTEUR_GENERAL', 'DIRECTEUR_ETUDES', 'ENSEIGNANT'],
+    description: 'Manuels, programmes officiels & livres scolaires',
+  },
+  {
+    id: 'exam-dossiers',
+    label: "Dossiers d'examen",
+    icon: ClipboardCheck,
+    allowedRoles: ['PROMOTEUR', 'DIRECTEUR_GENERAL', 'DIRECTEUR_ETUDES'],
+    description: "BEPC & BAC : pièces obligatoires, conformité & alertes",
+  },
+  {
     id: 'lessons',
     label: 'Cahiers de texte',
     icon: BookOpen,
@@ -100,7 +119,7 @@ const NAV_ITEMS: NavItem[] = [
     id: 'teachers',
     label: 'Corps Enseignant',
     icon: UserCheck,
-    allowedRoles: ['PROMOTEUR', 'DIRECTEUR_GENERAL', 'DIRECTEUR_ETUDES', 'ENSEIGNANT', 'COMPTABLE'],
+    allowedRoles: ['PROMOTEUR', 'DIRECTEUR_GENERAL', 'DIRECTEUR_ETUDES'],
     description: 'Affectations, horaires & fiches pro',
   },
   {
@@ -137,6 +156,13 @@ const NAV_ITEMS: NavItem[] = [
     icon: Wallet,
     allowedRoles: ['PROMOTEUR', 'DIRECTEUR_GENERAL', 'COMPTABLE'],
     description: 'Rémunérations, bulletins officiels & validation',
+  },
+  {
+    id: 'contracts-salaries',
+    label: 'Contrats & Salaires',
+    icon: FileCheck2,
+    allowedRoles: ['PROMOTEUR'],
+    description: 'Gestion individuelle des salaires et contrats',
   },
   {
     id: 'decisions',

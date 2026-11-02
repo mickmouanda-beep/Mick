@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-import { queryOne, run } from './db.ts';
+import { logFirestoreAudit } from './firestore_db.ts';
 
 export { jwt };
 export const JWT_SECRET = process.env.JWT_SECRET || 'faith_school_manager_ultra_secure_secret_brazzaville_2026';
@@ -28,6 +28,7 @@ export interface AuthUser {
   username: string;
   email: string | null;
   full_name: string;
+  phone?: string | null;
   role: UserRole;
   status: 'ACTIVE' | 'SUSPENDED';
   student_id?: string | null;
@@ -55,6 +56,7 @@ export function generateToken(user: AuthUser): string {
       email: user.email,
       full_name: user.full_name,
       role: user.role,
+      status: user.status || 'ACTIVE',
       student_id: user.student_id || null,
     },
     JWT_SECRET,
@@ -110,33 +112,24 @@ export function authenticateToken(req: AuthenticatedRequest, res: Response, next
 
   try {
     const decoded = jwt.verify(token, JWT_SECRET) as any;
-    
-    // Check if user is still active in database
-    const user = queryOne<AuthUser>(
-      'SELECT id, establishment_id, username, email, full_name, role, status, student_id FROM users WHERE id = ?',
-      [decoded.id]
-    );
 
-    if (!user) {
-      return res.status(401).json({ error: 'Utilisateur introuvable.' });
+    if (!decoded || !decoded.id) {
+      return res.status(401).json({ error: 'Jeton de sécurité invalide.' });
     }
+
+    const user: AuthUser = {
+      id: decoded.id,
+      establishment_id: decoded.establishment_id,
+      username: decoded.username,
+      email: decoded.email || null,
+      full_name: decoded.full_name,
+      role: decoded.role,
+      status: decoded.status || 'ACTIVE',
+      student_id: decoded.student_id || null,
+    };
 
     if (user.status !== 'ACTIVE') {
       return res.status(403).json({ error: 'Votre compte a été suspendu par la direction.' });
-    }
-
-    // Vérification de la suspension globale de l'établissement (sauf ADMIN_GENERAL)
-    if (user.role !== 'ADMIN_GENERAL' && user.establishment_id) {
-      const est = queryOne<{ status?: string; suspension_reason?: string }>(
-        'SELECT status, suspension_reason FROM establishments WHERE id = ?',
-        [user.establishment_id]
-      );
-      if (est && est.status === 'SUSPENDED' && req.method !== 'GET') {
-        return res.status(403).json({
-          error: `Cet établissement est temporairement suspendu par la plateforme Eco GES. ${est.suspension_reason ? `Motif : ${est.suspension_reason}. ` : ''}Toute opération d'écriture est bloquée.`,
-          establishmentSuspended: true,
-        });
-      }
     }
 
     req.user = user;
@@ -175,11 +168,21 @@ export function logAudit(
   try {
     const id = `LOG-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
     const detailsStr = typeof details === 'object' ? JSON.stringify(details) : details ? String(details) : null;
-    run(
-      `INSERT INTO audit_logs (id, establishment_id, user_id, user_name, action, entity_type, entity_id, details, ip_address, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
-      [id, establishmentId, userId, userName, action, entityType, entityId, detailsStr, ipAddress]
-    );
+    const logData = {
+      id,
+      establishment_id: establishmentId,
+      user_id: userId,
+      user_name: userName,
+      action,
+      entity_type: entityType,
+      entity_id: entityId,
+      details: detailsStr,
+      ip_address: ipAddress,
+      created_at: new Date().toISOString(),
+    };
+    logFirestoreAudit(id, logData).catch((err) => {
+      console.warn("Échec de l'enregistrement de l'audit log Firestore:", err?.message || err);
+    });
   } catch (err) {
     console.error("Échec de l'enregistrement de l'audit log:", err);
   }

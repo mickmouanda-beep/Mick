@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Printer,
   Download,
@@ -14,6 +14,8 @@ import { Payment, Establishment } from '../types.ts';
 import { PrintableReceipt } from './PrintableReceipt.tsx';
 import { api } from '../lib/api.ts';
 import { numberToFrenchWords } from '../utils/numberToFrenchWords.ts';
+import { CloseButton } from './CloseButton.tsx';
+import { printDocument, downloadPdf } from '../utils/printPdfUtils.ts';
 
 interface PaymentReceiptModalProps {
   payments: Payment | Payment[];
@@ -34,6 +36,20 @@ export const PaymentReceiptModal: React.FC<PaymentReceiptModalProps> = ({
 
   const paymentList: Payment[] = Array.isArray(payments) ? payments : [payments];
   const isMultiple = paymentList.length > 1;
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    const handlePopState = () => onClose();
+
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('popstate', handlePopState);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('popstate', handlePopState);
+    };
+  }, [onClose]);
 
   // Enregistrer l'impression / réimpression dans le journal d'audit
   const handlePrint = async () => {
@@ -58,8 +74,18 @@ export const PaymentReceiptModal: React.FC<PaymentReceiptModalProps> = ({
       }
     } finally {
       setLoggingPrint(false);
-      window.print();
+      await printDocument(
+        'printable-payment-receipts',
+        isMultiple ? 'Quittances_Groupees' : `Quittance_${paymentList[0]?.receipt_number || 'paiement'}`
+      );
     }
+  };
+
+  const handleDownloadPdf = async () => {
+    const filename = isMultiple
+      ? `Quittances_${paymentList.length}_recus.pdf`
+      : `Quittance_${paymentList[0]?.receipt_number || 'FSM'}.pdf`;
+    await downloadPdf('printable-payment-receipts', filename);
   };
 
   // Partage WhatsApp du reçu
@@ -173,13 +199,13 @@ _Document officiel certifié généré par Eco GES_`;
               </button>
             )}
 
-            {/* Bouton Télécharger en PDF (lance l'impression avec option enregistrer PDF) */}
+            {/* Bouton Télécharger en PDF */}
             <button
               type="button"
               disabled={loggingPrint}
-              onClick={handlePrint}
-              className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-xl text-xs font-semibold flex items-center space-x-1.5 transition"
-              title="Télécharger en PDF via le module d'impression"
+              onClick={handleDownloadPdf}
+              className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-xl text-xs font-semibold flex items-center space-x-1.5 transition cursor-pointer"
+              title="Télécharger en PDF"
             >
               <Download className="w-3.5 h-3.5" />
               <span>Télécharger PDF</span>
@@ -197,18 +223,12 @@ _Document officiel certifié généré par Eco GES_`;
             </button>
 
             {/* Fermer */}
-            <button
-              type="button"
-              onClick={onClose}
-              className="p-1.5 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition"
-            >
-              <X className="w-5 h-5" />
-            </button>
+            <CloseButton onClose={onClose} className="sticky top-2 z-10" />
           </div>
         </div>
 
         {/* CORPS DE L'APERÇU IMPRIMABLE */}
-        <div className="overflow-y-auto p-2 sm:p-4 space-y-6 flex-1 bg-slate-950/40 rounded-xl border border-slate-800/60 my-3">
+        <div id="printable-payment-receipts" className="overflow-y-auto p-2 sm:p-4 space-y-6 flex-1 bg-slate-950/40 rounded-xl border border-slate-800/60 my-3 printable-document">
           {paymentList.map((payment, index) => (
             <div
               key={payment.id || index}

@@ -58,7 +58,7 @@ export const StudentPhotoCapture: React.FC<StudentPhotoCaptureProps> = ({
     }
   };
 
-  const takeSnapshot = () => {
+  const takeSnapshot = async () => {
     if (!videoRef.current) return;
     const video = videoRef.current;
     const canvas = document.createElement('canvas');
@@ -74,13 +74,12 @@ export const StudentPhotoCapture: React.FC<StudentPhotoCaptureProps> = ({
     const startY = (video.videoHeight - size) / 2;
 
     ctx.drawImage(video, startX, startY, size, size, 0, 0, 320, 320);
-    const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
-
-    onPhotoChange(dataUrl);
+    
+    onPhotoChange(canvas.toDataURL('image/jpeg', 0.85));
     stopCamera();
   };
 
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
@@ -91,26 +90,10 @@ export const StudentPhotoCapture: React.FC<StudentPhotoCaptureProps> = ({
 
     const reader = new FileReader();
     reader.onload = (event) => {
-      const img = new Image();
-      img.onload = () => {
-        // Redimensionner et compresser en carré d'identité
-        const canvas = document.createElement('canvas');
-        const size = Math.min(img.width, img.height);
-        canvas.width = 320;
-        canvas.height = 320;
-        const ctx = canvas.getContext('2d');
-        if (!ctx) return;
-
-        const startX = (img.width - size) / 2;
-        const startY = (img.height - size) / 2;
-
-        ctx.drawImage(img, startX, startY, size, size, 0, 0, 320, 320);
-        const compressedDataUrl = canvas.toDataURL('image/jpeg', 0.85);
-        onPhotoChange(compressedDataUrl);
-      };
-      img.src = event.target?.result as string;
+      onPhotoChange(event.target?.result as string);
     };
     reader.readAsDataURL(file);
+
     // Reset file input
     e.target.value = '';
   };

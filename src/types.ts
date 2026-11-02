@@ -138,9 +138,29 @@ export interface User {
   full_name: string;
   phone?: string | null;
   role: UserRole;
-  status: 'ACTIVE' | 'SUSPENDED';
+  status: 'ACTIVE' | 'SUSPENDED' | 'PENDING_ACTIVATION';
   student_id?: string | null;
+  class_id?: string | null;
+  class_name?: string | null;
+  is_activated?: boolean;
+  activation_code?: string;
+  activation_code_expires_at?: string;
+  must_change_password?: boolean;
+  guardian_id?: string | null;
   created_at?: string;
+}
+
+export interface Guardian {
+  id: string;
+  establishment_id: string;
+  name: string;
+  phone: string;
+  email?: string | null;
+  address?: string | null;
+  userId?: string | null;
+  studentIds: string[];
+  created_at?: string;
+  updated_at?: string;
 }
 
 export interface Establishment {
@@ -182,6 +202,7 @@ export interface SchoolClass {
   cycle_code: 'PRE_SCOLAIRE' | 'PRIMAIRE' | 'COLLEGE' | 'LYCEE';
   level_code: string;
   serie_code?: string | null;
+  section?: string | null;
   room?: string | null;
   capacity: number;
   main_teacher_id?: string | null;
@@ -226,6 +247,14 @@ export interface Student {
   guardian_phone: string;
   guardian_email?: string | null;
   guardian_relation: string;
+  guardianIds?: string[];
+  is_financial_responsible?: boolean;
+  parent_activated?: boolean;
+  student_activated?: boolean;
+  parent_activation_code?: string;
+  parent_activation_code_expires_at?: string;
+  student_activation_code?: string;
+  student_activation_code_expires_at?: string;
   class_id?: string | null;
   class_name?: string | null;
   level_code?: string | null;
@@ -279,10 +308,16 @@ export interface FeeStructure {
   academic_year: string;
   cycle_code?: string | null;
   level_code?: string | null;
+  class_id?: string | null;
+  class_name?: string | null;
   fee_type: string;
   name: string;
   amount: number;
+  periodicity?: 'UNIQUE' | 'MENSUEL' | 'TRIMESTRIEL';
+  months_count?: number;
   due_date?: string | null;
+  created_at?: string;
+  updated_at?: string;
 }
 
 export interface Payment {
@@ -294,6 +329,8 @@ export interface Payment {
   last_name?: string;
   matricule?: string;
   class_name?: string;
+  level_code?: string | null;
+  cycle_code?: string | null;
   payment_type?: string;
   fee_structure_id?: string | null;
   amount: number;
@@ -312,8 +349,17 @@ export interface Payment {
   balance_after?: number | null;
   total_due?: number | null;
   total_paid_to_date?: number | null;
+  // Audit des modifications par rapport à la grille tarifaire
+  tariff_modified?: boolean;
+  original_tariff_amount?: number;
+  modified_amount?: number;
+  modification_reason?: string | null;
+  months_paid?: string[];
+  template_snapshot?: import('./types/documentTemplates.ts').DocumentTemplateConfig | null;
   created_at: string;
 }
+
+export * from './types/documentTemplates.ts';
 
 export interface Expense {
   id: string;
@@ -350,6 +396,8 @@ export interface DisciplinaryIncident {
   observation?: string | null;
   action_taken?: string | null;
   assigned_to?: string | null;
+  parent_acknowledged_at?: string | null;
+  parent_acknowledged_by?: string | null;
   status: string; // 'SIGNOLE', 'EN_COURS', 'RESOLU', 'SANCTIONNE', 'CLASSE'
   created_at: string;
 }
@@ -401,6 +449,11 @@ export interface PayrollRecord {
   hire_date?: string | null;
   period: string; // e.g. 2026-10
   base_salary: number;
+  college_hours?: number;
+  lycee_hours?: number;
+  college_hourly_rate?: number;
+  lycee_hourly_rate?: number;
+  total_taught_hours?: number;
   bonuses: number;
   overtime_hours: number;
   overtime_amount: number;
@@ -417,6 +470,97 @@ export interface PayrollRecord {
   validated_at?: string | null;
   notes?: string | null;
   created_at?: string;
+}
+
+export interface TextbookEntry {
+  id: string;
+  establishment_id: string;
+  date: string;
+  class_id: string;
+  class_name?: string;
+  subject_id: string;
+  subject_name?: string;
+  teacher_id: string;
+  teacher_name?: string;
+  heure?: string;
+  start_time?: string;
+  end_time?: string;
+  time_slot?: string;
+  chapitre?: string;
+  titre: string;
+  objectif_general?: string;
+  objectifs_specifiques?: string[] | string;
+  resume?: string;
+  exemple?: string;
+  statut: 'Fait' | 'Partiellement fait' | 'Non fait' | 'VUE_TERMINEE' | 'PARTIELLEMENT_VUE' | 'EN_COURS' | 'REPORTEE';
+  motif?: string;
+  travail_a_faire?: string;
+  date_remise?: string;
+  evaluation_prevue?: string;
+  observations?: string;
+  visa?: { name: string; date: string; role: string; comments?: string } | null;
+  incomplete: boolean;
+  // Level adaptation
+  competence_visee?: string;
+  objectifs_prescolaire?: string[];
+  activite_realisee?: string;
+  materiel_utilise?: string;
+  cycle_code?: string;
+  level_code?: string;
+  serie_code?: string;
+  // Lock & History
+  edit_history?: Array<{ user_id: string; user_name: string; timestamp: string; old_value: any; reason?: string }>;
+  de_approval?: { approved: boolean; approved_by: string; approved_at: string } | null;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface TextbookForecast {
+  id: string;
+  establishment_id: string;
+  teacher_id: string;
+  teacher_name?: string;
+  class_id: string;
+  class_name?: string;
+  subject_id: string;
+  subject_name?: string;
+  week_code: string; // e.g. 2026-W44
+  day_of_week: string;
+  date?: string;
+  planned_content: string;
+  objectives?: string;
+  created_at?: string;
+}
+
+export interface CurriculumChapter {
+  id: string;
+  chapter_number?: number;
+  title: string;
+  general_objective?: string;
+  specific_objectives?: string[];
+  hourly_volume?: number;
+}
+
+export interface Curriculum {
+  id: string;
+  establishment_id: string;
+  level_code: string;
+  cycle_code?: string;
+  class_id?: string;
+  class_name?: string;
+  serie_code?: string | null;
+  subject_id: string;
+  subject_name: string;
+  subject_code?: string;
+  chapters: CurriculumChapter[];
+  textbook_ref?: {
+    title?: string;
+    author?: string;
+    publisher?: string;
+    page?: string;
+  };
+  created_at?: string;
+  updated_at?: string;
 }
 
 export interface LessonLog {
@@ -468,7 +612,10 @@ export interface LessonLog {
     | 'PARTIELLEMENT_VUE'
     | 'A_REVOIR'
     | 'NON_TERMINEE'
-    | 'REPORTEE';
+    | 'REPORTEE'
+    | 'Fait'
+    | 'Partiellement fait'
+    | 'Non fait';
   next_lesson?: string | null;
   created_at?: string;
 }
@@ -579,9 +726,11 @@ export interface SchoolAnnouncement {
   title: string;
   content: string;
   target_audience: 'ALL' | 'STUDENTS' | 'PARENTS' | 'TEACHERS';
+  target_class_id?: string | null;
   category: 'GENERAL' | 'PEDAGOGIQUE' | 'ADMINISTRATIF' | 'URGENT' | 'EVENEMENT';
   author_id: string;
   author_name: string;
+  author_role?: string;
   is_published: number;
   created_at: string;
 }
@@ -612,6 +761,7 @@ export interface StudentPortalData {
     lates: number;
   };
   attendanceHistory: any[];
+  courseAttendanceHistory?: any[];
   disciplinaryIncidents: DisciplinaryIncident[];
   justifications: AbsenceJustification[];
   lessonLogs: LessonLog[];
@@ -629,7 +779,10 @@ export interface StudentPortalData {
     totalFeesDue: number;
     totalFeesPaid: number;
     balance: number;
+    totalDue?: number;
+    totalPaid?: number;
     payments: any[];
+    applicableFees?: any[];
   };
 }
 
@@ -694,27 +847,77 @@ export interface StaffAttendanceRules {
   overtime_hourly_bonus: number;
   checkin_mode_preschool_primary: 'JOURNALIER' | 'PAR_SEANCE';
   checkin_mode_college_lycee: 'JOURNALIER' | 'PAR_SEANCE';
+  preschool_primary_morning_time?: string;
+  preschool_primary_noon_time?: string;
   updated_by: string;
   updated_at: string;
 }
 
-export interface StaffSalaryParameter {
+export interface StudentCourseAttendance {
   id: string;
   establishment_id: string;
+  student_id: string;
+  class_id: string;
+  subject_id?: string | null;
+  subject_name?: string | null;
+  schedule_id?: string | null;
+  session_type?: 'MATIN' | 'FIN_MATINEE' | 'COURS' | null;
+  date: string;
+  start_time?: string | null;
+  end_time?: string | null;
+  status: 'PRESENT' | 'ABSENT' | 'RETARD';
+  motif_category?: 'SANTE' | 'DISCIPLINE' | 'SORTIE' | 'AUTRE' | null;
+  motif?: string | null;
+  teacher_id: string;
+  teacher_name?: string | null;
+  edit_history?: Array<{ edited_by: string; edited_at: string; previous_status: string; edit_reason: string }>;
+  updated_at: string;
+}
+
+export interface AttendanceAlert {
+  id: string;
+  type: 'SUSPICIOUS_ABSENCE' | 'STUDENT_LEFT' | 'MISSING_ROLL_CALL';
+  student_id?: string;
+  student_name?: string;
+  matricule?: string;
+  class_id?: string;
+  class_name?: string;
+  subject_name?: string;
+  schedule_id?: string;
+  teacher_name?: string;
+  start_time?: string;
+  end_time?: string;
+  message: string;
+  details?: string;
+}
+
+export interface StaffSalaryParameter {
+  id: string;
+  establishment_id?: string;
   user_id: string;
   full_name?: string;
   employee_code?: string;
   role?: string;
-  wage_type: 'MENSUEL_FIXE' | 'HORAIRE';
-  base_salary: number;
-  hourly_rate: number;
-  transport_allowance: number;
-  responsibility_bonus: number;
-  seniority_bonus: number;
-  overtime_rate: number;
-  active: number;
-  updated_by: string;
-  updated_at: string;
+  is_configured?: boolean;
+  contract_type?: string | null;
+  start_date?: string | null;
+  duration_end_date?: string | null;
+  wage_type?: 'MENSUEL_FIXE' | 'HORAIRE' | 'ENSEIGNANT_COLLEGE_LYCEE' | null;
+  base_salary?: number | null;
+  hourly_rate?: number | null;
+  college_hourly_rate?: number | null;
+  lycee_hourly_rate?: number | null;
+  transport_allowance?: number | null;
+  responsibility_bonus?: number | null;
+  seniority_bonus?: number | null;
+  other_bonuses?: number | null;
+  overtime_rate?: number | null;
+  teaching_category?: 'COLLEGE_ONLY' | 'LYCEE_ONLY' | 'COLLEGE_AND_LYCEE' | null;
+  teaching_level?: 'PRE_SCOLAIRE' | 'PRIMAIRE' | null;
+  observations?: string;
+  active?: number;
+  updated_by?: string;
+  updated_at?: string;
 }
 
 export interface CourseSchedule {
@@ -740,4 +943,118 @@ export interface CourseSchedule {
   created_at?: string;
   updated_at?: string;
 }
+
+export interface CurriculumProgram {
+  id: string;
+  establishment_id: string;
+  title: string;
+  subject_id?: string | null;
+  subject_name: string;
+  class_id?: string | null;
+  class_name: string;
+  academic_year: string;
+  file_name: string;
+  file_type: string;
+  file_size: number;
+  file_path?: string;
+  file_data?: string | null;
+  uploaded_by_id?: string;
+  uploaded_by_name?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+// ==========================================
+// SUIVI DES DOSSIERS D'EXAMEN (BEPC & BAC)
+// ==========================================
+
+export type ExamType = 'BEPC' | 'BAC';
+
+export interface ExamRequiredDocument {
+  id: string;
+  name: string;
+  type: 'original' | 'photocopie' | 'original_or_photocopy';
+  order: number;
+  is_mandatory?: boolean;
+}
+
+export interface ExamConfiguration {
+  id: string;
+  establishment_id: string;
+  academic_year: string;
+  exam_type: ExamType;
+  exam_name: string;
+  deadline: string; // YYYY-MM-DD
+  required_documents: ExamRequiredDocument[];
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface ExamDocumentStatus {
+  received?: boolean;
+  received_at?: string;
+  received_by_id?: string;
+  received_by_name?: string;
+  is_checked?: boolean;
+  checked_at?: string;
+  checked_by_id?: string;
+  checked_by_name?: string;
+  doc_id?: string;
+  [key: string]: any;
+}
+
+export interface ExamCandidate {
+  id: string;
+  establishment_id: string;
+  academic_year: string;
+  exam_type: ExamType;
+  student_id: string;
+  class_id: string;
+  class_name?: string;
+  serie_code?: string | null;
+  is_retained: boolean | number;
+  checklist: Record<string, ExamDocumentStatus>;
+  status: 'COMPLET' | 'INCOMPLET';
+  documents_received_count: number;
+  documents_total_count: number;
+  created_at?: string;
+  updated_at?: string;
+  // Données élève jointes
+  first_name?: string;
+  last_name?: string;
+  matricule?: string;
+  birth_date?: string;
+  gender?: string;
+  photo_data?: string | null;
+  guardian_name?: string;
+  guardian_phone?: string;
+  guardian_relation?: string;
+}
+
+export interface ExamDossierLog {
+  id: string;
+  candidate_id: string;
+  student_id: string;
+  exam_type: string;
+  doc_id: string;
+  doc_name: string;
+  action: 'CHECKED' | 'UNCHECKED';
+  user_id: string;
+  user_name: string;
+  created_at: string;
+}
+
+export interface ExamNotificationLog {
+  id: string;
+  candidate_id: string;
+  student_id: string;
+  recipient_name: string;
+  recipient_phone?: string;
+  channel: 'WHATSAPP' | 'SMS' | 'IN_APP';
+  message: string;
+  sent_by_id?: string;
+  sent_by_name: string;
+  created_at: string;
+}
+
 

@@ -33,15 +33,17 @@ import {
   Users,
   Building,
   RotateCw,
-  Menu
+  Menu,
+  Database
 } from 'lucide-react';
 import { api } from '../lib/api.ts';
 import { useAuth } from '../context/AuthContext.tsx';
 import { DeveloperStats, CreationAuthorization, Establishment, SchoolLicense } from '../types.ts';
 import { formatBrazzavilleDateTime, formatBrazzavilleDate } from '../lib/dateUtils.ts';
 import { SchoolLogoCapture } from '../components/SchoolLogoCapture.tsx';
+import { DataMaintenanceSection } from '../components/DataMaintenanceSection.tsx';
 
-type CentralTab = 'dashboard' | 'establishments' | 'authorizations' | 'licenses' | 'audit' | 'promoters-recovery';
+type CentralTab = 'dashboard' | 'establishments' | 'authorizations' | 'licenses' | 'audit' | 'promoters-recovery' | 'maintenance';
 
 const centralTabs = [
   { id: 'dashboard' as CentralTab, label: 'Tableau de bord', icon: LayoutDashboard },
@@ -50,6 +52,7 @@ const centralTabs = [
   { id: 'licenses' as CentralTab, label: 'Gestion des licences', icon: FileCheck2 },
   { id: 'promoters-recovery' as CentralTab, label: 'Assistance et récupération des comptes promoteurs', icon: KeyRound },
   { id: 'audit' as CentralTab, label: 'Journaux d’audit', icon: Shield },
+  { id: 'maintenance' as CentralTab, label: 'Maintenance des données', icon: Database },
 ];
 
 export const DeveloperView: React.FC = () => {
@@ -1436,6 +1439,13 @@ export const DeveloperView: React.FC = () => {
             </div>
           )}
 
+          {/* ========================================================
+              RUBRIQUE 6 : MAINTENANCE DES DONNÉES & DIAGNOSTICS
+             ======================================================== */}
+          {activeTab === 'maintenance' && (
+            <DataMaintenanceSection />
+          )}
+
         </main>
       </div>
 
@@ -1545,7 +1555,8 @@ export const DeveloperView: React.FC = () => {
                   </label>
                   <input
                     type="number"
-                    min={1}
+                    step="any"
+                    min={0}
                     value={newAuthValidityDays}
                     onChange={(e) => setNewAuthValidityDays(parseInt(e.target.value, 10) || 90)}
                     className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500"

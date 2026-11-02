@@ -25,6 +25,8 @@ import { api } from '../lib/api.ts';
 import { useAuth } from '../context/AuthContext.tsx';
 import { SchoolClass, Subject, ClassSubject, User } from '../types.ts';
 import { OFFICIAL_CYCLES, OFFICIAL_LYCEE_SERIES, CONGO_SERIES_CATALOG, DetailedSerieRef, CONGO_COLLEGE_CATALOG, CollegeClassRef } from '../constants.ts';
+import { printDocument, downloadPdf } from '../utils/printPdfUtils.ts';
+import { PrintHeader } from '../components/PrintHeader.tsx';
 
 const DAYS_OF_WEEK = [
   { id: 1, label: 'Lundi' },
@@ -57,15 +59,26 @@ export const AcademicView: React.FC = () => {
   const [slotTeacherId, setSlotTeacherId] = useState<string>('');
   const [slotRoom, setSlotRoom] = useState<string>('');
 
-  // Modal Création Classe
+  // Modal Création Classe / Section
   const [showClassModal, setShowClassModal] = useState(false);
   const [selectedCycle, setSelectedCycle] = useState<string>('COLLEGE');
   const [selectedLevel, setSelectedLevel] = useState<string>('6ème');
   const [selectedSerie, setSelectedSerie] = useState<string>('');
+  const [sectionName, setSectionName] = useState<string>('A');
   const [className, setClassName] = useState<string>('');
   const [room, setRoom] = useState<string>('');
   const [capacity, setCapacity] = useState<number>(45);
   const [mainTeacherId, setMainTeacherId] = useState<string>('');
+
+  // Modal Édition Classe
+  const [showEditClassModal, setShowEditClassModal] = useState(false);
+  const [editingClass, setEditingClass] = useState<SchoolClass | null>(null);
+  const [editSectionName, setEditSectionName] = useState<string>('');
+  const [editClassName, setEditClassName] = useState<string>('');
+  const [editRoom, setEditRoom] = useState<string>('');
+  const [editCapacity, setEditCapacity] = useState<number>(45);
+  const [editMainTeacherId, setEditMainTeacherId] = useState<string>('');
+  const [editStatus, setEditStatus] = useState<'ACTIVE' | 'INACTIVE'>('ACTIVE');
 
   // Modal Création Matière
   const [showSubjectModal, setShowSubjectModal] = useState(false);
@@ -166,6 +179,16 @@ export const AcademicView: React.FC = () => {
     }
   };
 
+  // Auto-génération du nom de classe lors du changement de cycle, niveau, série ou section
+  useEffect(() => {
+    if (showClassModal) {
+      const parts = [selectedLevel];
+      if (selectedCycle === 'LYCEE' && selectedSerie) parts.push(selectedSerie);
+      if (sectionName.trim()) parts.push(sectionName.trim());
+      setClassName(parts.join(' '));
+    }
+  }, [selectedCycle, selectedLevel, selectedSerie, sectionName, showClassModal]);
+
   const handleCreateClass = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
@@ -179,6 +202,7 @@ export const AcademicView: React.FC = () => {
     try {
       await api.createClass({
         name: className.trim(),
+        section: sectionName.trim() || null,
         cycleCode: selectedCycle,
         levelCode: selectedLevel,
         serieCode: selectedCycle === 'LYCEE' && selectedSerie ? selectedSerie : null,
@@ -187,13 +211,48 @@ export const AcademicView: React.FC = () => {
         mainTeacherId: mainTeacherId || null,
       });
 
-      setSuccess(`La classe "${className}" a été créée avec succès.`);
+      setSuccess(`La section/classe "${className}" a été créée avec succès.`);
       setShowClassModal(false);
       setClassName('');
+      setSectionName('A');
       setRoom('');
       await loadData();
     } catch (err: any) {
       setError(err.message || 'Erreur lors de la création de la classe.');
+    }
+  };
+
+  const openEditModal = (cls: SchoolClass) => {
+    setEditingClass(cls);
+    setEditSectionName(cls.section || '');
+    setEditClassName(cls.name || '');
+    setEditRoom(cls.room || '');
+    setEditCapacity(cls.capacity || 45);
+    setEditMainTeacherId(cls.main_teacher_id || '');
+    setEditStatus(cls.status || 'ACTIVE');
+    setShowEditClassModal(true);
+  };
+
+  const handleUpdateClass = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingClass) return;
+    setError(null);
+    setSuccess(null);
+    try {
+      await api.updateClass(editingClass.id, {
+        name: editClassName.trim(),
+        section: editSectionName.trim() || null,
+        room: editRoom.trim() || null,
+        capacity: Number(editCapacity),
+        mainTeacherId: editMainTeacherId || null,
+        status: editStatus,
+      });
+      setSuccess(`Classe "${editClassName}" mise à jour.`);
+      setShowEditClassModal(false);
+      setEditingClass(null);
+      await loadData();
+    } catch (err: any) {
+      setError(err.message || 'Erreur lors de la mise à jour.');
     }
   };
 
@@ -407,7 +466,7 @@ export const AcademicView: React.FC = () => {
               <table className="w-full text-left text-xs text-slate-300">
                 <thead className="bg-slate-800/60 text-slate-400 uppercase tracking-wider text-[10px] border-b border-slate-800">
                   <tr>
-                    <th className="p-3.5">Classe</th>
+                    <th className="p-3.5">Classe & Section</th>
                     <th className="p-3.5">Cycle</th>
                     <th className="p-3.5">Niveau</th>
                     <th className="p-3.5">Série (Lycée)</th>
@@ -420,9 +479,17 @@ export const AcademicView: React.FC = () => {
                 <tbody className="divide-y divide-slate-800/60">
                   {classes.map((cls) => (
                     <tr key={cls.id} className="hover:bg-slate-800/40 transition">
-                      <td className="p-3.5 font-bold text-white flex items-center space-x-2">
-                        <span className="w-2 h-2 rounded-full bg-indigo-500" />
-                        <span>{cls.name}</span>
+                      <td className="p-3.5 font-bold text-white">
+                        <div className="flex items-center space-x-2">
+                          <span className="w-2 h-2 rounded-full bg-indigo-500" />
+                          <span className="text-sm">{cls.name}</span>
+                          {cls.section && (
+                            <span className="px-2 py-0.5 rounded text-[10px] font-extrabold bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
+                              Sec. {cls.section}
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-[10px] font-mono text-slate-500 mt-0.5">ID: {cls.id}</div>
                       </td>
                       <td className="p-3.5">
                         <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-slate-800 text-slate-300 border border-slate-700">
@@ -452,13 +519,22 @@ export const AcademicView: React.FC = () => {
                       <td className="p-3.5 text-slate-400">{cls.room || '-'}</td>
                       {canManage && (
                         <td className="p-3.5 text-right">
-                          <button
-                            onClick={() => handleDeleteClass(cls.id, cls.name)}
-                            className="p-1.5 text-slate-400 hover:text-rose-400 hover:bg-slate-800 rounded transition"
-                            title="Supprimer la classe"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
+                          <div className="flex items-center justify-end space-x-1">
+                            <button
+                              onClick={() => openEditModal(cls)}
+                              className="p-1.5 text-slate-400 hover:text-indigo-400 hover:bg-slate-800 rounded transition"
+                              title="Modifier la classe"
+                            >
+                              <Edit2 className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              onClick={() => handleDeleteClass(cls.id, cls.name)}
+                              className="p-1.5 text-slate-400 hover:text-rose-400 hover:bg-slate-800 rounded transition"
+                              title="Supprimer la classe"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
                         </td>
                       )}
                     </tr>
@@ -573,8 +649,8 @@ export const AcademicView: React.FC = () => {
                 <label className="block text-[11px] font-semibold text-slate-300 mb-1">Coefficient *</label>
                 <input
                   type="number"
-                  step="0.5"
-                  min="0.5"
+                  step="any"
+                  min="0"
                   required
                   value={assignCoef}
                   onChange={(e) => setAssignCoef(Number(e.target.value))}
@@ -586,8 +662,8 @@ export const AcademicView: React.FC = () => {
                 <label className="block text-[11px] font-semibold text-slate-300 mb-1">Heures/Semaine *</label>
                 <input
                   type="number"
-                  step="1"
-                  min="1"
+                  step="any"
+                  min="0"
                   required
                   value={assignWeeklyHours}
                   onChange={(e) => setAssignWeeklyHours(Number(e.target.value))}
@@ -801,8 +877,8 @@ export const AcademicView: React.FC = () => {
                       <span>Coefficient officiel</span>
                     </div>
                     <div className="divide-y divide-slate-800/50 max-h-48 overflow-y-auto">
-                      {serie.subjects.map((sub) => (
-                        <div key={sub.code} className="px-3 py-2 text-xs flex items-center justify-between">
+                      {serie.subjects.map((sub, sIdx) => (
+                        <div key={`${serie.code}-${sub.code}-${sIdx}`} className="px-3 py-2 text-xs flex items-center justify-between">
                           <div className="flex items-center space-x-2">
                             <span className="font-mono text-[10px] text-amber-400 font-bold">{sub.code}</span>
                             <span className="text-slate-200">{sub.name}</span>
@@ -882,8 +958,8 @@ export const AcademicView: React.FC = () => {
                       </span>
                     </div>
                     <div className="divide-y divide-slate-800/50 max-h-48 overflow-y-auto">
-                      {col.subjects.map((sub) => (
-                        <div key={sub.code} className="px-3 py-2 text-xs flex items-center justify-between">
+                      {col.subjects.map((sub, cIdx) => (
+                        <div key={`${col.code}-${sub.code}-${cIdx}`} className="px-3 py-2 text-xs flex items-center justify-between">
                           <div className="flex items-center space-x-2">
                             <span className="font-mono text-[10px] text-amber-400 font-bold">{sub.code}</span>
                             <span className="text-slate-200">{sub.name}</span>
@@ -941,13 +1017,25 @@ export const AcademicView: React.FC = () => {
               </div>
             </div>
 
-            <div className="flex items-center space-x-2">
+            <div className="flex items-center space-x-2 no-print">
               <button
-                onClick={() => window.print()}
-                className="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-xl text-xs font-semibold flex items-center space-x-1.5 transition"
+                onClick={() => printDocument('printable-academic-schedule', 'Emploi du temps')}
+                className="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-xl text-xs font-semibold flex items-center space-x-1.5 transition cursor-pointer"
               >
                 <Printer className="w-3.5 h-3.5 text-slate-400" />
-                <span>Imprimer l'Emploi du Temps</span>
+                <span>Imprimer</span>
+              </button>
+
+              <button
+                onClick={() => {
+                  const currentClass = classes.find((c) => c.id === selectedScheduleClassId);
+                  const className = currentClass ? currentClass.name.replace(/\s+/g, '_') : 'classe';
+                  downloadPdf('printable-academic-schedule', `Emploi_du_temps_${className}_${establishment?.academic_year || '2025-2026'}.pdf`);
+                }}
+                className="px-3.5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-semibold flex items-center space-x-1.5 transition shadow cursor-pointer"
+              >
+                <Printer className="w-3.5 h-3.5 text-white" />
+                <span>Télécharger PDF</span>
               </button>
 
               {canManage && selectedScheduleClassId && (
@@ -972,7 +1060,15 @@ export const AcademicView: React.FC = () => {
             const classSlots = schedules.filter((s) => s.class_id === selectedScheduleClassId);
 
             return (
-              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-6 shadow-sm">
+              <div id="printable-academic-schedule" className="printable-document bg-white text-slate-900 p-6 rounded-2xl shadow-md space-y-4">
+                <div className="mb-4">
+                  <PrintHeader
+                    establishment={establishment}
+                    title={`EMPLOI DU TEMPS : ${currentClass?.name || 'CLASSE'}`}
+                    subtitle={`Niveau : ${currentClass?.level_code || ''} • Année académique : ${establishment?.academic_year || '2026-2027'} • Édité le ${new Date().toLocaleDateString('fr-FR')} à ${new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}`}
+                  />
+                </div>
+                <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-6 shadow-sm">
                 <div className="mb-4 pb-3 border-b border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                   <div>
                     <h3 className="text-sm font-bold text-white flex items-center space-x-2">
@@ -1044,6 +1140,7 @@ export const AcademicView: React.FC = () => {
                   })}
                 </div>
               </div>
+            </div>
             );
           })()}
         </div>
@@ -1250,18 +1347,34 @@ export const AcademicView: React.FC = () => {
                 </div>
               )}
 
-              <div>
-                <label className="block text-xs font-semibold text-slate-300 mb-1">
-                  Nom d'affichage de la classe *
-                </label>
-                <input
-                  type="text"
-                  required
-                  placeholder="Ex: 3ème A, Terminale D 1, CP1 B..."
-                  value={className}
-                  onChange={(e) => setClassName(e.target.value)}
-                  className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-xs text-white"
-                />
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">
+                    Section (champ libre)
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="Ex: A, B, 1, 2..."
+                    value={sectionName}
+                    onChange={(e) => setSectionName(e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-xs text-white uppercase font-bold"
+                  />
+                  <p className="text-[10px] text-slate-400 mt-1">Ex: A, B, 1, 2 (permet d'ouvrir plusieurs sections par niveau)</p>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">
+                    Nom d'affichage de la classe *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="Ex: 3ème A, Terminale D 1, CP1 B..."
+                    value={className}
+                    onChange={(e) => setClassName(e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-xs text-white font-bold"
+                  />
+                </div>
               </div>
 
               <div className="grid grid-cols-2 gap-3">
@@ -1319,6 +1432,131 @@ export const AcademicView: React.FC = () => {
                   className="px-5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-semibold shadow-md"
                 >
                   Enregistrer la Classe
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL ÉDITION DE CLASSE */}
+      {showEditClassModal && editingClass && (
+        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-xs flex items-center justify-center p-4 z-50">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-lg p-6 shadow-2xl">
+            <div className="flex items-center justify-between pb-4 border-b border-slate-800">
+              <h2 className="text-base font-bold text-white flex items-center space-x-2">
+                <Edit2 className="w-5 h-5 text-indigo-400" />
+                <span>Modifier la Classe / Section ({editingClass.name})</span>
+              </h2>
+              <button
+                onClick={() => { setShowEditClassModal(false); setEditingClass(null); }}
+                className="text-slate-400 hover:text-white"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleUpdateClass} className="space-y-4 pt-4">
+              <div className="p-3 bg-slate-800/50 rounded-xl border border-slate-700/50 text-xs text-slate-300 space-y-1">
+                <p><strong>ID Unique:</strong> <code className="text-indigo-400 font-mono">{editingClass.id}</code></p>
+                <p><strong>Cycle & Niveau:</strong> {editingClass.cycle_code} — {editingClass.level_code} {editingClass.serie_code ? `(Série ${editingClass.serie_code})` : ''}</p>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">
+                    Section
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="Ex: A, B, 1, 2..."
+                    value={editSectionName}
+                    onChange={(e) => setEditSectionName(e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-xs text-white font-bold"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">
+                    Nom d'affichage complet *
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={editClassName}
+                    onChange={(e) => setEditClassName(e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-xs text-white font-bold"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">Salle de cours</label>
+                  <input
+                    type="text"
+                    placeholder="Ex: Salle 04, Bâtiment B"
+                    value={editRoom}
+                    onChange={(e) => setEditRoom(e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-xs text-white"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">Capacité maximale</label>
+                  <input
+                    type="number"
+                    min="10"
+                    max="100"
+                    value={editCapacity}
+                    onChange={(e) => setEditCapacity(Number(e.target.value))}
+                    className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-xs text-white"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 mb-1">
+                  Professeur Principal / Titulaire
+                </label>
+                <select
+                  value={editMainTeacherId}
+                  onChange={(e) => setEditMainTeacherId(e.target.value)}
+                  className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-xs text-white"
+                >
+                  <option value="">Désigner ultérieurement</option>
+                  {teachers.map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.full_name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 mb-1">Statut</label>
+                <select
+                  value={editStatus}
+                  onChange={(e) => setEditStatus(e.target.value as 'ACTIVE' | 'INACTIVE')}
+                  className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-xs text-white"
+                >
+                  <option value="ACTIVE">Actif</option>
+                  <option value="INACTIVE">Inactif / Fermé</option>
+                </select>
+              </div>
+
+              <div className="flex justify-end space-x-2 pt-4 border-t border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => { setShowEditClassModal(false); setEditingClass(null); }}
+                  className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-xs font-semibold"
+                >
+                  Annuler
+                </button>
+                <button
+                  type="submit"
+                  className="px-5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-semibold shadow-md"
+                >
+                  Mettre à jour
                 </button>
               </div>
             </form>
@@ -1387,8 +1625,8 @@ export const AcademicView: React.FC = () => {
                   <label className="block text-xs font-semibold text-slate-300 mb-1">Coef. par défaut</label>
                   <input
                     type="number"
-                    step="0.5"
-                    min="1"
+                    step="any"
+                    min="0"
                     value={defaultCoef}
                     onChange={(e) => setDefaultCoef(Number(e.target.value))}
                     className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-xs text-white"

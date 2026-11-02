@@ -31,7 +31,27 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
   const data = await response.json().catch(() => ({}));
 
   if (!response.ok) {
-    throw new Error(data.error || `Erreur serveur (${response.status})`);
+    let errorMsg = data.error || `Erreur serveur (${response.status})`;
+    try {
+      if (typeof errorMsg === 'string' && errorMsg.startsWith('{')) {
+        const parsed = JSON.parse(errorMsg);
+        errorMsg = parsed.error || parsed.message || errorMsg;
+      }
+    } catch {}
+
+    if (
+      response.status === 503 ||
+      (typeof errorMsg === 'string' && (
+        errorMsg.includes('Base de données indisponible') ||
+        errorMsg.includes('PERMISSION_DENIED') ||
+        errorMsg.includes('FIRESTORE_BLOCKED')
+      ))
+    ) {
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('database-unavailable', { detail: { message: errorMsg, data } }));
+      }
+    }
+    throw new Error(errorMsg);
   }
 
   return data as T;
@@ -39,7 +59,15 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
 
 export const api = {
   // Statut & Setup
-  getStatus: () => request<any>('/status'),
+  getStatus: async () => {
+    const res = await request<any>('/status');
+    if (res && res.databaseAvailable === false) {
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('database-unavailable', { detail: { message: res.databaseError, data: res } }));
+      }
+    }
+    return res;
+  },
   initializeSetup: (payload: any) => request<any>('/setup/initialize', { method: 'POST', body: JSON.stringify(payload) }),
   seedDemoData: () => request<any>('/setup/seed-demo', { method: 'POST' }),
 
@@ -103,9 +131,12 @@ export const api = {
   renewEstablishmentLicense: (id: string, durationMonths: number = 12, notes?: string) =>
     request<any>(`/developer/licenses/${id}/renew`, { method: 'POST', body: JSON.stringify({ durationMonths, notes }) }),
 
-  // Établissement
+  // Établissement & Modèles de Documents
   getSettings: () => request<any>('/establishment/settings'),
   updateSettings: (payload: any) => request<any>('/establishment/settings', { method: 'PUT', body: JSON.stringify(payload) }),
+  getDocumentTemplate: (docType: string) => request<any>(`/document-templates/${docType}`),
+  saveDocumentTemplate: (docType: string, config: any) =>
+    request<any>(`/document-templates/${docType}`, { method: 'PUT', body: JSON.stringify(config) }),
   getAuditLogs: () => request<any[]>('/audit-logs'),
 
   // Utilisateurs
@@ -138,6 +169,7 @@ export const api = {
   updateStudent: (id: string, payload: any) => request<any>(`/students/${id}`, { method: 'PUT', body: JSON.stringify(payload) }),
   transferStudent: (id: string, payload: any) => request<any>(`/students/${id}/transfer`, { method: 'POST', body: JSON.stringify(payload) }),
   deleteStudent: (id: string) => request<any>(`/students/${id}`, { method: 'DELETE' }),
+  provisionStudentAccounts: (id: string) => request<any>(`/students/${id}/provision-accounts`, { method: 'POST' }),
 
   // Enseignants
   getTeachers: () => request<any[]>('/teachers'),
@@ -181,10 +213,26 @@ export const api = {
   saveEvaluationGrades: (evalId: string, grades: any[]) => request<any>(`/evaluations/${evalId}/grades`, { method: 'POST', body: JSON.stringify({ grades }) }),
   lockEvaluation: (evalId: string, isLocked: boolean) => request<any>(`/evaluations/${evalId}/lock`, { method: 'POST', body: JSON.stringify({ isLocked }) }),
   getReportCards: (classId: string, term: string) => request<any>(`/report-cards/class/${classId}?term=${term}`),
+  publishReportCards: (payload: { classId: string; term: string; reports: any[]; academicYear?: string }) => request<any>('/report-cards/publish', { method: 'POST', body: JSON.stringify(payload) }),
+  repairParentStudentLinks: (payload?: { dryRun?: boolean }) => request<any>('/academic/repair-parent-student-links', { method: 'POST', body: JSON.stringify(payload || {}) }),
 
   // Présences & Discipline
   getAttendance: (classId: string, date: string) => request<any[]>(`/attendance?classId=${classId}&date=${date}`),
   saveAttendance: (classId: string, date: string, records: any[]) => request<any>('/attendance', { method: 'POST', body: JSON.stringify({ classId, date, records }) }),
+  getCourseAttendance: (params: { classId: string; date: string; scheduleId?: string; sessionType?: string }) => {
+    const q = new URLSearchParams();
+    q.set('classId', params.classId);
+    q.set('date', params.date);
+    if (params.scheduleId) q.set('scheduleId', params.scheduleId);
+    if (params.sessionType) q.set('sessionType', params.sessionType);
+    return request<any[]>(`/attendance/course-rollcall?${q.toString()}`);
+  },
+  saveCourseAttendance: (payload: { classId: string; date: string; scheduleId?: string; sessionType?: string; records: any[]; editReason?: string }) =>
+    request<any>('/attendance/course-rollcall', { method: 'POST', body: JSON.stringify(payload) }),
+  getAttendanceAlerts: (date?: string) => {
+    const q = date ? `?date=${encodeURIComponent(date)}` : '';
+    return request<any[]>(`/attendance/alerts${q}`);
+  },
   getDisciplineIncidents: () => request<any[]>('/discipline'),
   createDisciplineIncident: (payload: any) => request<any>('/discipline', { method: 'POST', body: JSON.stringify(payload) }),
   updateDisciplineIncident: (id: string, payload: any) => request<any>(`/discipline/${id}`, { method: 'PUT', body: JSON.stringify(payload) }),
@@ -197,6 +245,9 @@ export const api = {
   // Comptabilité
   getFeeStructures: () => request<any[]>('/finance/fee-structures'),
   createFeeStructure: (payload: any) => request<any>('/finance/fee-structures', { method: 'POST', body: JSON.stringify(payload) }),
+  updateFeeStructure: (id: string, payload: any) => request<any>(`/finance/fee-structures/${id}`, { method: 'PUT', body: JSON.stringify(payload) }),
+  deleteFeeStructure: (id: string) => request<any>(`/finance/fee-structures/${id}`, { method: 'DELETE' }),
+  getStudentFeeStatus: (studentId: string) => request<any>(`/finance/student-fee-status/${studentId}`),
   getStudentBalances: () => request<any[]>('/finance/student-balances'),
   getPayments: () => request<any[]>('/finance/payments'),
   createPayment: (payload: any) => request<any>('/finance/payments', { method: 'POST', body: JSON.stringify(payload) }),
@@ -225,22 +276,48 @@ export const api = {
   deletePayrollRecord: (id: string) => request<any>(`/finance/payroll/${id}`, { method: 'DELETE' }),
 
   // Cahier de texte officiel & Pédagogie (DE, DG, Promoteur, Enseignant)
-  getLessons: (params: { teacherId?: string; classId?: string; subjectId?: string; date?: string; status?: string } = {}) => {
+  getLessons: (params: { teacherId?: string; classId?: string; subjectId?: string; date?: string; status?: string; incomplete?: boolean } = {}) => {
     const query = new URLSearchParams();
     if (params.teacherId) query.append('teacherId', params.teacherId);
     if (params.classId) query.append('classId', params.classId);
     if (params.subjectId) query.append('subjectId', params.subjectId);
     if (params.date) query.append('date', params.date);
     if (params.status) query.append('status', params.status);
+    if (params.incomplete) query.append('incomplete', 'true');
     return request<any[]>(`/lessons?${query.toString()}`);
   },
   createLesson: (payload: any) => request<any>('/lessons', { method: 'POST', body: JSON.stringify(payload) }),
   updateLesson: (id: string, payload: any) => request<any>(`/lessons/${id}`, { method: 'PUT', body: JSON.stringify(payload) }),
+  visaLesson: (id: string, payload: { comments?: string; approveEditLock?: boolean }) =>
+    request<any>(`/lessons/${id}/visa`, { method: 'POST', body: JSON.stringify(payload) }),
   getLessonObservations: (lessonId: string) => request<any[]>(`/lessons/${lessonId}/observations`),
   createLessonObservation: (lessonId: string, payload: any) => request<any>(`/lessons/${lessonId}/observations`, { method: 'POST', body: JSON.stringify(payload) }),
   replyLessonObservation: (obsId: string, reply: string) => request<any>(`/lessons/observations/${obsId}/reply`, { method: 'POST', body: JSON.stringify({ reply }) }),
   updateObservationStatus: (obsId: string, status: string) => request<any>(`/lessons/observations/${obsId}/status`, { method: 'PUT', body: JSON.stringify({ status }) }),
   getLessonProgress: () => request<any[]>('/lessons/progress/summary'),
+
+  // Prévisions de la semaine
+  getForecasts: (weekCode?: string, teacherId?: string) => {
+    const q = new URLSearchParams();
+    if (weekCode) q.set('weekCode', weekCode);
+    if (teacherId) q.set('teacherId', teacherId);
+    return request<any[]>(`/lessons/forecasts/week?${q.toString()}`);
+  },
+  saveForecast: (payload: any) => request<any>('/lessons/forecasts', { method: 'POST', body: JSON.stringify(payload) }),
+  copyPreviousForecasts: (currentWeekCode: string, previousWeekCode: string) =>
+    request<any>('/lessons/forecasts/copy-previous', { method: 'POST', body: JSON.stringify({ currentWeekCode, previousWeekCode }) }),
+
+  // Programmes scolaires (Curriculum)
+  getCurriculum: (params: { levelCode?: string; classId?: string; subjectId?: string } = {}) => {
+    const q = new URLSearchParams();
+    if (params.levelCode) q.set('levelCode', params.levelCode);
+    if (params.classId) q.set('classId', params.classId);
+    if (params.subjectId) q.set('subjectId', params.subjectId);
+    return request<any[]>(`/curriculum?${q.toString()}`);
+  },
+  importCurriculumCsv: (csvData: string) => request<any>('/curriculum/import-csv', { method: 'POST', body: JSON.stringify({ csvData }) }),
+  importCurriculumAi: (payload: { fileBase64: string; mimeType?: string; levelCode?: string; subjectName?: string }) =>
+    request<any>('/curriculum/import-ai', { method: 'POST', body: JSON.stringify(payload) }),
 
   // Pointage Enseignants (Surveillant, DE, DG, Promoteur, Enseignant)
   getTeacherAttendances: (date?: string, teacherId?: string) => {
@@ -272,8 +349,11 @@ export const api = {
   updateDecision: (id: string, payload: any) => request<any>(`/decisions/${id}`, { method: 'PUT', body: JSON.stringify(payload) }),
 
   // Espace Élève & Espace Parent / Tuteur (ECO. GES.)
-  getStudentPortalData: (studentId?: string) => {
-    const q = studentId ? `?studentId=${encodeURIComponent(studentId)}` : '';
+  getStudentPortalData: (studentId?: string, term?: string) => {
+    let q = studentId ? `?studentId=${encodeURIComponent(studentId)}` : '';
+    if (term) {
+      q += (q ? '&' : '?') + `term=${encodeURIComponent(term)}`;
+    }
     return request<any>(`/student/portal-data${q}`);
   },
   submitAbsenceJustification: (payload: { studentId: string; attendanceId?: string; date: string; reason: string; documentUrl?: string }) =>
@@ -314,5 +394,161 @@ export const api = {
 
   // Dashboard
   getDashboardStats: () => request<any>('/dashboard/stats'),
+
+  // Maintenance des données & Diagnostics
+  pingFirestore: () => request<any>('/firestore/ping'),
+  exportSqliteData: async () => {
+    const token = getAuthToken();
+    const headers: Record<string, string> = {};
+    if (token) {
+      headers['Authorization'] = `Bearer ${token}`;
+    }
+    const response = await fetch('/api/admin/export-sqlite', {
+      method: 'GET',
+      headers,
+    });
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      throw new Error(err.error || `Erreur lors de l'exportation (${response.status})`);
+    }
+    return response.json();
+  },
+  getMigrationMapping: () => request<any>('/migration/mapping'),
+  runMigration: (dryRun: boolean, targetTableName?: string) =>
+    request<any>('/migration/run', { method: 'POST', body: JSON.stringify({ dryRun, targetTableName }) }),
+
+  // Activation & Discipline Acknowledgment
+  activateAccount: (payload: { code: string; password: string; accountType?: string }) =>
+    request<any>('/auth/activate-account', { method: 'POST', body: JSON.stringify(payload) }),
+  generateActivationCode: (studentId: string, accountType: 'PARENT' | 'ELEVE') =>
+    request<any>(`/students/${studentId}/activation-code`, { method: 'POST', body: JSON.stringify({ accountType }) }),
+  acknowledgeDiscipline: (incidentId: string) =>
+    request<any>(`/discipline/${incidentId}/acknowledge`, { method: 'POST' }),
+
+  // Référentiel programmes & manuels scolaires (D.E & Enseignants)
+  getCurriculumPrograms: (params?: { subjectId?: string; classId?: string; academicYear?: string; search?: string }) => {
+    const q = new URLSearchParams();
+    if (params?.subjectId) q.set('subjectId', params.subjectId);
+    if (params?.classId) q.set('classId', params.classId);
+    if (params?.academicYear) q.set('academicYear', params.academicYear);
+    if (params?.search) q.set('search', params.search);
+    const qs = q.toString();
+    return request<any[]>(`/curriculum-programs${qs ? `?${qs}` : ''}`);
+  },
+  deleteCurriculumProgram: (id: string) => request<any>(`/curriculum-programs/${id}`, { method: 'DELETE' }),
+  getCurriculumProgramFileUrl: (id: string) => {
+    const token = getAuthToken();
+    return `${API_BASE}/curriculum-programs/${id}/file${token ? `?token=${encodeURIComponent(token)}` : ''}`;
+  },
+  getCurriculumProgramDownloadUrl: (id: string) => {
+    const token = getAuthToken();
+    return `${API_BASE}/curriculum-programs/${id}/download${token ? `?token=${encodeURIComponent(token)}` : ''}`;
+  },
+
+  // Suivi des dossiers d'examen (D.E, D.G, Promoteur)
+  getExamConfig: (examType: 'BEPC' | 'BAC', academicYear?: string) => {
+    const q = new URLSearchParams();
+    q.set('examType', examType);
+    if (academicYear) q.set('academicYear', academicYear);
+    return request<any>(`/exam-dossiers/config?${q.toString()}`);
+  },
+  updateExamConfig: (payload: { exam_type: 'BEPC' | 'BAC'; academic_year?: string; required_documents: any[]; deadline?: string | null }) =>
+    request<any>('/exam-dossiers/config', { method: 'PUT', body: JSON.stringify(payload) }),
+  getExamCandidates: (params: {
+    examType: 'BEPC' | 'BAC';
+    academicYear?: string;
+    classId?: string;
+    serieCode?: string;
+    status?: string;
+    retainedOnly?: boolean;
+    search?: string;
+  }) => {
+    const q = new URLSearchParams();
+    q.set('examType', params.examType);
+    if (params.academicYear) q.set('academicYear', params.academicYear);
+    if (params.classId) q.set('classId', params.classId);
+    if (params.serieCode) q.set('serieCode', params.serieCode);
+    if (params.status) q.set('status', params.status);
+    if (params.retainedOnly !== undefined) q.set('retainedOnly', String(params.retainedOnly));
+    if (params.search) q.set('search', params.search);
+    return request<any>(`/exam-dossiers/candidates?${q.toString()}`);
+  },
+  toggleCandidateRetained: (candidateId: string, isRetained: boolean) =>
+    request<any>('/exam-dossiers/candidates/toggle-retained', { method: 'POST', body: JSON.stringify({ candidateId, isRetained }) }),
+  toggleAllCandidatesRetained: (payload: { examType: 'BEPC' | 'BAC'; academicYear?: string; serieCode?: string; isRetained: boolean }) =>
+    request<any>('/exam-dossiers/candidates/toggle-all-retained', { method: 'POST', body: JSON.stringify(payload) }),
+  checkCandidateDoc: (candidateId: string, payload: { docId: string; isChecked: boolean; note?: string }) =>
+    request<any>(`/exam-dossiers/candidates/${candidateId}/check-doc`, { method: 'POST', body: JSON.stringify(payload) }),
+  getCandidateLogs: (candidateId: string) =>
+    request<{ logs: any[]; notifications: any[] }>(`/exam-dossiers/candidates/${candidateId}/logs`),
+  sendExamNotification: (payload: {
+    candidateId: string;
+    channel: 'WHATSAPP' | 'SMS' | 'IN_APP';
+    recipientName: string;
+    recipientPhone?: string;
+    message: string;
+  }) => request<any>('/exam-dossiers/notifications/send', { method: 'POST', body: JSON.stringify(payload) }),
+  sendBulkExamNotifications: (payload: {
+    candidateIds: string[];
+    channel: 'WHATSAPP' | 'SMS' | 'IN_APP';
+    customMessageTemplate?: string;
+  }) => request<any>('/exam-dossiers/notifications/send-bulk', { method: 'POST', body: JSON.stringify(payload) }),
+  getExamStats: (academicYear?: string) => {
+    const q = new URLSearchParams();
+    if (academicYear) q.set('academicYear', academicYear);
+    return request<any>(`/exam-dossiers/stats?${q.toString()}`);
+  },
 };
+
+/**
+ * Upload ou mise à jour d'un programme avec suivi précis de la progression de transfert
+ */
+export function uploadCurriculumProgram(
+  payload: any,
+  editId?: string | null,
+  onProgress?: (percent: number, loaded: number, total: number) => void
+): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const token = getAuthToken();
+    const url = editId ? `${API_BASE}/curriculum-programs/${editId}` : `${API_BASE}/curriculum-programs`;
+
+    xhr.open(editId ? 'PUT' : 'POST', url);
+    xhr.setRequestHeader('Content-Type', 'application/json');
+    if (token) {
+      xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+    }
+
+    if (xhr.upload && onProgress) {
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable) {
+          const percent = Math.min(100, Math.round((event.loaded / event.total) * 100));
+          onProgress(percent, event.loaded, event.total);
+        }
+      };
+    }
+
+    xhr.onload = () => {
+      let data: any = {};
+      try {
+        data = JSON.parse(xhr.responseText);
+      } catch {
+        data = {};
+      }
+
+      if (xhr.status >= 200 && xhr.status < 300) {
+        resolve(data);
+      } else {
+        const errorMsg = data.error || `Erreur d'importation (${xhr.status})`;
+        reject(new Error(errorMsg));
+      }
+    };
+
+    xhr.onerror = () => {
+      reject(new Error('Erreur de connexion réseau lors du transfert du fichier.'));
+    };
+
+    xhr.send(JSON.stringify(payload));
+  });
+}
 

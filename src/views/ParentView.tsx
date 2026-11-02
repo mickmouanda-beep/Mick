@@ -26,9 +26,11 @@ import { api } from '../lib/api.ts';
 import { useAuth } from '../context/AuthContext.tsx';
 import { StudentView } from './StudentView.tsx';
 import { SchoolAnnouncement } from '../types.ts';
+import { PrintHeader } from '../components/PrintHeader.tsx';
+import { printDocument, downloadPdf } from '../utils/printPdfUtils.ts';
 
 export const ParentView: React.FC = () => {
-  const { user } = useAuth();
+  const { user, establishment } = useAuth();
   const [children, setChildren] = useState<any[]>([]);
   const [selectedChildId, setSelectedChildId] = useState<string>('');
   const [announcements, setAnnouncements] = useState<SchoolAnnouncement[]>([]);
@@ -145,11 +147,11 @@ export const ParentView: React.FC = () => {
               Vos enfants scolarisés ({children.length}) :
             </div>
             <div className="flex flex-wrap gap-2.5">
-              {children.map((child) => {
+              {children.map((child, idx) => {
                 const isSelected = child.id === selectedChildId;
                 return (
                   <button
-                    key={child.id}
+                    key={child.id ? `${child.id}-${idx}` : `child-btn-${idx}`}
                     onClick={() => handleSelectChild(child.id)}
                     className={`flex items-center space-x-3 px-3.5 py-2 rounded-xl text-xs font-semibold transition border cursor-pointer ${
                       isSelected
@@ -174,39 +176,51 @@ export const ParentView: React.FC = () => {
         )}
       </div>
 
-      {/* Navigation Onglets Espace Parent */}
-      <div className="flex border-b border-slate-800 overflow-x-auto pb-px space-x-2">
-        {[
-          { id: 'child-space', label: `Dossier de ${selectedChild ? selectedChild.first_name : 'l\'enfant'}`, icon: GraduationCap },
-          { id: 'finance-summary', label: 'Point Financier & Reçus', icon: DollarSign },
-          { id: 'contact-school', label: 'Contacter l\'Établissement / RDV', icon: MessageSquare },
-          { id: 'announcements', label: 'Circulaires & Convocations', icon: Bell },
-        ].map((tab) => {
-          const Icon = tab.icon;
-          const isActive = activeTab === tab.id;
-          return (
-            <button
-              key={tab.id}
-              onClick={() => setActiveTab(tab.id as any)}
-              className={`flex items-center space-x-2 px-4 py-2.5 text-xs font-semibold rounded-t-xl transition whitespace-nowrap cursor-pointer ${
-                isActive
-                  ? 'bg-slate-800 text-indigo-400 border-t-2 border-indigo-500 shadow-sm'
-                  : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900/60'
-              }`}
-            >
-              <Icon className="w-4 h-4" />
-              <span>{tab.label}</span>
-            </button>
-          );
-        })}
-      </div>
-
-      {/* 1. ONGLET : DOSSIER SCOLAIRE COMPLET DE L'ENFANT SÉLECTIONNÉ */}
-      {activeTab === 'child-space' && selectedChild && (
-        <div className="space-y-6">
-          <StudentView studentIdOverride={selectedChild.id} readOnlyBanner={false} />
+      {children.length === 0 && !loading && (
+        <div className="p-12 text-center bg-slate-900 border border-slate-800 rounded-2xl space-y-3">
+          <GraduationCap className="w-12 h-12 text-slate-500 mx-auto" />
+          <h3 className="text-base font-bold text-white">Aucun élève rattaché à votre compte parent</h3>
+          <p className="text-xs text-slate-400 max-w-md mx-auto">
+            Votre compte parent n'est actuellement rattaché à aucun dossier d'élève dans cet établissement. Veuillez contacter l'administration scolaire pour effectuer le rattachement de vos enfants.
+          </p>
         </div>
       )}
+
+      {/* Navigation Onglets Espace Parent */}
+      {children.length > 0 && (
+        <>
+          <div className="flex border-b border-slate-800 overflow-x-auto pb-px space-x-2">
+            {[
+              { id: 'child-space', label: `Dossier de ${selectedChild ? selectedChild.first_name : 'l\'enfant'}`, icon: GraduationCap },
+              { id: 'finance-summary', label: 'Point Financier & Reçus', icon: DollarSign },
+              { id: 'contact-school', label: 'Contacter l\'Établissement / RDV', icon: MessageSquare },
+              { id: 'announcements', label: 'Circulaires & Convocations', icon: Bell },
+            ].map((tab) => {
+              const Icon = tab.icon;
+              const isActive = activeTab === tab.id;
+              return (
+                <button
+                  key={tab.id}
+                  onClick={() => setActiveTab(tab.id as any)}
+                  className={`flex items-center space-x-2 px-4 py-2.5 text-xs font-semibold rounded-t-xl transition whitespace-nowrap cursor-pointer ${
+                    isActive
+                      ? 'bg-slate-800 text-indigo-400 border-t-2 border-indigo-500 shadow-sm'
+                      : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900/60'
+                  }`}
+                >
+                  <Icon className="w-4 h-4" />
+                  <span>{tab.label}</span>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* 1. ONGLET : DOSSIER SCOLAIRE COMPLET DE L'ENFANT SÉLECTIONNÉ */}
+          {activeTab === 'child-space' && selectedChild && (
+            <div className="space-y-6">
+              <StudentView studentIdOverride={selectedChild.id} readOnlyBanner={false} />
+            </div>
+          )}
 
       {/* 2. ONGLET : POINT FINANCIER & REÇUS POUR LA FAMILLE */}
       {activeTab === 'finance-summary' && (
@@ -219,8 +233,14 @@ export const ParentView: React.FC = () => {
           </div>
 
           <div className="space-y-4">
-            {children.map((ch) => (
-              <div key={ch.id} className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4">
+            {children.map((ch, idx) => (
+              <div key={ch.id ? `${ch.id}-${idx}` : `parent-fin-${idx}`} id={`printable-parent-finance-${ch.id}`} className="printable-document bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4">
+                <PrintHeader
+                  establishment={establishment}
+                  title="SITUATION FINANCIÈRE ET ÉTAT DES VERSEMENTS"
+                  docNumber={ch.matricule}
+                  subtitle={`Élève : ${ch.first_name} ${ch.last_name} • Classe : ${ch.class_name || '—'}`}
+                />
                 <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 border-b border-slate-800/80 pb-3">
                   <div className="flex items-center space-x-3">
                     <div className="w-10 h-10 rounded-xl bg-indigo-900/40 border border-indigo-700/50 flex items-center justify-center font-bold text-indigo-300">
@@ -236,7 +256,7 @@ export const ParentView: React.FC = () => {
                       setSelectedChildId(ch.id);
                       setActiveTab('child-space');
                     }}
-                    className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-semibold flex items-center space-x-1"
+                    className="no-print px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-semibold flex items-center space-x-1 cursor-pointer"
                   >
                     <span>Voir le dossier complet</span>
                     <ChevronRight className="w-3.5 h-3.5" />
@@ -246,27 +266,44 @@ export const ParentView: React.FC = () => {
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                   <div className="bg-slate-950 p-3 rounded-xl border border-slate-800/70">
                     <span className="text-[11px] text-slate-400 block">Frais Annuels Exigibles</span>
-                    <span className="text-base font-bold text-white font-mono mt-0.5 block">220 000 FCFA</span>
+                    <span className="text-base font-bold text-white font-mono mt-0.5 block">
+                      {(ch.financials?.totalFeesDue ?? ch.financials?.totalDue ?? 0).toLocaleString()} {establishment?.currency || 'FCFA'}
+                    </span>
                   </div>
                   <div className="bg-slate-950 p-3 rounded-xl border border-slate-800/70">
                     <span className="text-[11px] text-emerald-400 block">Total Versé</span>
-                    <span className="text-base font-bold text-emerald-400 font-mono mt-0.5 block">90 000 FCFA</span>
+                    <span className="text-base font-bold text-emerald-400 font-mono mt-0.5 block">
+                      {(ch.financials?.totalFeesPaid ?? ch.financials?.totalPaid ?? 0).toLocaleString()} {establishment?.currency || 'FCFA'}
+                    </span>
                   </div>
                   <div className="bg-slate-950 p-3 rounded-xl border border-slate-800/70">
                     <span className="text-[11px] text-amber-400 block">Solde à Régler</span>
-                    <span className="text-base font-bold text-amber-400 font-mono mt-0.5 block">130 000 FCFA</span>
+                    <span className="text-base font-bold text-amber-400 font-mono mt-0.5 block">
+                      {(ch.financials?.balance ?? 0).toLocaleString()} {establishment?.currency || 'FCFA'}
+                    </span>
                   </div>
                 </div>
 
-                <div className="text-xs text-slate-400 flex items-center justify-between pt-1">
+                <div className="text-xs text-slate-400 flex flex-col sm:flex-row sm:items-center justify-between gap-2 pt-1 border-t border-slate-800/50">
                   <span>Prochaine échéance : Tranche 2 avant le 10 Janvier 2027</span>
-                  <button
-                    onClick={() => window.print()}
-                    className="text-indigo-400 hover:text-indigo-300 font-semibold flex items-center space-x-1"
-                  >
-                    <Printer className="w-3.5 h-3.5" />
-                    <span>Imprimer état des versements</span>
-                  </button>
+                  <div className="flex items-center space-x-2 no-print">
+                    <button
+                      onClick={() => printDocument(`printable-parent-finance-${ch.id}`, `Etat_Versements_${ch.matricule}`)}
+                      className="text-slate-300 hover:text-white font-semibold flex items-center space-x-1 cursor-pointer bg-slate-800 border border-slate-700 px-2.5 py-1 rounded-lg text-xs"
+                      title="Imprimer l'état des versements"
+                    >
+                      <Printer className="w-3.5 h-3.5" />
+                      <span>Imprimer</span>
+                    </button>
+                    <button
+                      onClick={() => downloadPdf(`printable-parent-finance-${ch.id}`, `Etat_Versements_${ch.matricule}.pdf`)}
+                      className="text-indigo-200 hover:text-white font-semibold flex items-center space-x-1 cursor-pointer bg-indigo-600 hover:bg-indigo-500 px-2.5 py-1 rounded-lg text-xs"
+                      title="Télécharger l'état des versements en PDF"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      <span>Télécharger PDF</span>
+                    </button>
+                  </div>
                 </div>
               </div>
             ))}
@@ -396,8 +433,8 @@ export const ParentView: React.FC = () => {
             </div>
           ) : (
             <div className="space-y-3">
-              {announcements.map((ann) => (
-                <div key={ann.id} className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-2">
+              {announcements.map((ann: any, idx: number) => (
+                <div key={ann.id || `parent-ann-${idx}`} className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-2">
                   <div className="flex items-center justify-between">
                     <span className="px-2 py-0.5 bg-amber-950 text-amber-300 border border-amber-700/40 rounded text-[10px] font-bold">
                       {ann.category}
@@ -416,6 +453,8 @@ export const ParentView: React.FC = () => {
             </div>
           )}
         </div>
+      )}
+        </>
       )}
     </div>
   );

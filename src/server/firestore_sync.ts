@@ -21,17 +21,14 @@ export interface DualWriteResult {
 }
 
 /**
- * Exécute une écriture sécurisée avec priorité Cloud Firestore.
- * Si Firestore réussit, l'écriture locale SQLite miroir est effectuée et l'opération est validée.
- * Si Firestore échoue (panne réseau, hors-ligne), l'écriture SQLite est réalisée et une entrée
- * est enregistrée dans firestore_sync_queue avec l'identifiant stable et le statut PENDING.
- * L'appelant reçoit un statut transparent et non trompeur.
+ * Exécute une écriture sur Cloud Firestore.
+ * Tout repli automatique vers SQLite est supprimé.
+ * Si Firestore est inaccessible : l'écriture est immédiatement bloquée, l'erreur complète est journalisée,
+ * et une exception explicite est levée (aucun enregistrement sans confirmation Firestore).
+ * SQLite reste en lecture seule, uniquement comme source de la migration.
  */
 export async function executeDualWrite(params: DualWriteParams): Promise<DualWriteResult> {
-  const { establishmentId, collectionPath, docId, operation, payload, sqliteWriter } = params;
-
-  let cloudSuccess = false;
-  let cloudErrorMsg: string | null = null;
+  const { establishmentId, collectionPath, docId, operation, payload } = params;
 
   try {
     if (operation === 'DELETE') {
@@ -45,56 +42,25 @@ export async function executeDualWrite(params: DualWriteParams): Promise<DualWri
       };
       await setDocData(collectionPath, docId, dataToStore);
     }
-    cloudSuccess = true;
-  } catch (err: any) {
-    cloudSuccess = false;
-    cloudErrorMsg = err?.message || String(err);
-    console.warn(`[DUAL_WRITE_REPLI] Firestore indisponible pour ${collectionPath}/${docId}:`, cloudErrorMsg);
-  }
 
-  // Écriture locale SQLite miroir
-  try {
-    sqliteWriter();
-  } catch (sqlErr: any) {
-    console.error(`[DUAL_WRITE_FATAL] Erreur écriture SQLite pour ${docId}:`, sqlErr);
-    throw sqlErr;
-  }
-
-  if (cloudSuccess) {
     return {
       success: true,
       docId,
       syncStatus: 'CONFIRMED_CLOUD_PERSISTED',
     };
+  } catch (err: any) {
+    const fullSerializedError = JSON.stringify(err, Object.getOwnPropertyNames(err));
+    console.error(`[FIRESTORE_BLOCKED] Firestore inaccessible sur ${collectionPath}/${docId}. Écriture bloquée :`, fullSerializedError);
+    
+    const blockedError: any = new Error('Base de données indisponible : les modifications NE sont PAS sauvegardées');
+    blockedError.code = 'DATABASE_UNAVAILABLE';
+    blockedError.statusCode = 503;
+    blockedError.details = err?.message || String(err);
+    blockedError.fullSerializedError = fullSerializedError;
+    throw blockedError;
   }
-
-  // Enregistrement dans la file d'attente hors-ligne pour synchronisation différée
-  const queueId = `SYNC-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 6)}`;
-  try {
-    run(`
-      INSERT INTO firestore_sync_queue (
-        id, establishment_id, collection_path, doc_id, operation, payload, status, error_message
-      ) VALUES (?, ?, ?, ?, ?, ?, 'PENDING', ?)
-    `, [
-      queueId,
-      establishmentId,
-      collectionPath,
-      docId,
-      operation,
-      JSON.stringify(payload || {}),
-      cloudErrorMsg,
-    ]);
-  } catch (qErr) {
-    console.error('[DUAL_WRITE_QUEUE] Échec enregistrement file d’attente:', qErr);
-  }
-
-  return {
-    success: true,
-    docId,
-    syncStatus: 'LOCAL_FALLBACK_PENDING_SYNC',
-    warning: 'Enregistrement local effectué. Synchronisation cloud en file d’attente en attente de reconnexion.',
-  };
 }
+
 
 /**
  * Dépile et traite la file d'attente de synchronisation vers Firestore.

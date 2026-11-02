@@ -15,12 +15,14 @@ import {
   Printer,
   ChevronRight,
   Shield,
-  Layers,
-  GraduationCap
+  GraduationCap,
+  Download,
 } from 'lucide-react';
 import { api } from '../lib/api.ts';
 import { useAuth } from '../context/AuthContext.tsx';
 import { SchoolClass, Subject } from '../types.ts';
+import { printDocument, downloadPdf } from '../utils/printPdfUtils.ts';
+import { PrintHeader } from '../components/PrintHeader.tsx';
 
 const DAYS_OF_WEEK = [
   { id: 1, label: 'Lundi' },
@@ -32,7 +34,7 @@ const DAYS_OF_WEEK = [
 ];
 
 export const TeachersView: React.FC = () => {
-  const { user, hasRole } = useAuth();
+  const { user, hasRole, establishment } = useAuth();
   const [teachers, setTeachers] = useState<any[]>([]);
   const [classes, setClasses] = useState<SchoolClass[]>([]);
   const [subjects, setSubjects] = useState<Subject[]>([]);
@@ -91,6 +93,21 @@ export const TeachersView: React.FC = () => {
   const [success, setSuccess] = useState<string | null>(null);
 
   const canManageTeachers = hasRole(['PROMOTEUR', 'DIRECTEUR_GENERAL', 'DIRECTEUR_ETUDES']);
+  const isAuthorized = ['PROMOTEUR', 'DIRECTEUR_GENERAL', 'DIRECTEUR_ETUDES'].includes(user?.role || '');
+
+  if (!isAuthorized) {
+    return (
+      <div className="p-12 text-center space-y-4 max-w-xl mx-auto my-12 bg-slate-900 border border-slate-800 rounded-2xl">
+        <div className="w-12 h-12 bg-rose-500/10 text-rose-400 rounded-2xl flex items-center justify-center border border-rose-500/30 mx-auto">
+          <AlertCircle className="w-6 h-6" />
+        </div>
+        <h2 className="text-base font-bold text-white">Accès non autorisé</h2>
+        <p className="text-xs text-slate-400">
+          Le module "Corps Enseignant" est strictement réservé aux comptes Promoteur, Directeur Général et Directeur des Études.
+        </p>
+      </div>
+    );
+  }
 
   const loadData = async () => {
     setLoading(true);
@@ -107,6 +124,13 @@ export const TeachersView: React.FC = () => {
       setSubjects(sData);
       setCourseLogs(lData);
       setSchedules(schedData);
+
+      if (user?.role === 'ENSEIGNANT' && user?.id) {
+        const me = (tData || []).find((t: any) => String(t.id) === String(user.id)) || { id: user.id, full_name: user.full_name, username: user.username };
+        setSelectedTeacherForSchedule(me);
+      } else if (tData && tData.length > 0 && !selectedTeacherForSchedule) {
+        setSelectedTeacherForSchedule(tData[0]);
+      }
     } catch (err: any) {
       setError(err.message || 'Erreur lors du chargement des enseignants.');
     } finally {
@@ -649,13 +673,34 @@ export const TeachersView: React.FC = () => {
               </div>
             </div>
 
-            <div className="flex items-center space-x-2">
+            <div className="flex items-center space-x-2 no-print">
               <button
-                onClick={() => window.print()}
-                className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-xl text-xs font-semibold flex items-center space-x-1.5 transition"
+                onClick={() =>
+                  printDocument(
+                    'printable-teacher-schedule',
+                    `Emploi_du_temps_${selectedTeacherForSchedule?.full_name || 'Enseignant'}`
+                  )
+                }
+                className="px-3.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-xl text-xs font-semibold flex items-center space-x-1.5 transition cursor-pointer"
+                title="Imprimer l'emploi du temps"
               >
                 <Printer className="w-3.5 h-3.5 text-slate-400" />
-                <span>Imprimer l'Emploi du Temps</span>
+                <span>Imprimer</span>
+              </button>
+
+              <button
+                onClick={() => {
+                  const name = selectedTeacherForSchedule?.full_name?.replace(/\s+/g, '_') || 'enseignant';
+                  downloadPdf(
+                    'printable-teacher-schedule',
+                    `Emploi_du_temps_${name}_${establishment?.academic_year || '2026-2027'}.pdf`
+                  );
+                }}
+                className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-semibold flex items-center space-x-1.5 transition shadow cursor-pointer"
+                title="Télécharger en PDF"
+              >
+                <Download className="w-3.5 h-3.5 text-white" />
+                <span>Télécharger PDF</span>
               </button>
 
               {canManageTeachers && selectedTeacherForSchedule && (
@@ -674,8 +719,16 @@ export const TeachersView: React.FC = () => {
             </div>
           </div>
 
-          {/* Grille Hebdomadaire (Lundi à Samedi) */}
-          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-6 shadow-sm">
+          {/* Grille Hebdomadaire (Lundi à Samedi) avec Wrapper Imprimable */}
+          <div id="printable-teacher-schedule" className="printable-document bg-white text-slate-900 p-6 rounded-2xl shadow-md space-y-4">
+            <div className="mb-4">
+              <PrintHeader
+                establishment={establishment}
+                title={`EMPLOI DU TEMPS : ${selectedTeacherForSchedule?.full_name || 'ENSEIGNANT'}`}
+                subtitle={`Matières : ${selectedTeacherForSchedule?.assigned_subjects || 'Non attribuée'} • Classes : ${selectedTeacherForSchedule?.assigned_classes || 'Aucune'} • Année académique : ${establishment?.academic_year || '2026-2027'} • Édité le ${new Date().toLocaleDateString('fr-FR')} à ${new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}`}
+              />
+            </div>
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 sm:p-6 shadow-sm">
             <div className="mb-4 pb-3 border-b border-slate-800 flex items-center justify-between">
               <div>
                 <h3 className="text-sm font-bold text-white flex items-center space-x-2">
@@ -746,6 +799,7 @@ export const TeachersView: React.FC = () => {
             </div>
           </div>
         </div>
+      </div>
       )}
 
       {/* TAB 3: CAHIER DES HEURES EFFECTUÉES */}
@@ -966,9 +1020,8 @@ export const TeachersView: React.FC = () => {
                   <label className="block text-slate-300 mb-1 font-semibold">Coefficient pour cette classe</label>
                   <input
                     type="number"
-                    step="0.5"
-                    min="0.5"
-                    max="10"
+                    step="any"
+                    min="0"
                     required
                     value={assignCoeff}
                     onChange={(e) => setAssignCoeff(Number(e.target.value))}
@@ -979,9 +1032,8 @@ export const TeachersView: React.FC = () => {
                   <label className="block text-slate-300 mb-1 font-semibold">Volume horaire hebdo (heures)</label>
                   <input
                     type="number"
-                    step="0.5"
-                    min="1"
-                    max="15"
+                    step="any"
+                    min="0"
                     required
                     value={assignWeeklyHours}
                     onChange={(e) => setAssignWeeklyHours(Number(e.target.value))}
@@ -1233,9 +1285,8 @@ export const TeachersView: React.FC = () => {
                   <label className="block text-slate-300 mb-1 font-semibold">Volume (heures) *</label>
                   <input
                     type="number"
-                    step="0.5"
-                    min="0.5"
-                    max="10"
+                    step="any"
+                    min="0"
                     required
                     value={logHours}
                     onChange={(e) => setLogHours(Number(e.target.value))}

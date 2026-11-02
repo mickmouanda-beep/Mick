@@ -1,31 +1,33 @@
-import { initializeApp } from 'firebase/app';
-import {
-  getFirestore,
-  doc,
-  getDoc,
-  setDoc,
-  updateDoc,
-  deleteDoc,
-  getDocs,
-  collection,
-  query,
-  where
-} from 'firebase/firestore';
-import fs from 'fs';
-import path from 'path';
+import 'dotenv/config';
+import admin from 'firebase-admin';
+import { initializeApp, cert, getApps } from 'firebase-admin/app';
+import { getFirestore } from 'firebase-admin/firestore';
 
-let firebaseConfig: any = {};
-try {
-  const configPath = path.resolve(process.cwd(), 'firebase-applet-config.json');
-  if (fs.existsSync(configPath)) {
-    firebaseConfig = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+let serviceAccount: any = null;
+if (process.env.FIREBASE_SERVICE_ACCOUNT) {
+  try {
+    serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+  } catch (err: any) {
+    console.error('Erreur parsing FIREBASE_SERVICE_ACCOUNT:', err?.message);
   }
-} catch (e) {
-  console.error('Erreur lecture firebase-applet-config.json:', e);
 }
 
-const app = initializeApp(firebaseConfig);
-export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+export const firebaseProjectId = serviceAccount?.project_id || 'ecolef-7b853';
+
+const app = getApps().length > 0
+  ? getApps()[0]
+  : initializeApp({
+      credential: serviceAccount ? cert(serviceAccount) : undefined,
+      projectId: firebaseProjectId,
+    });
+
+// Base « (default) »
+export const db = getFirestore(app);
+try {
+  db.settings({ ignoreUndefinedProperties: true });
+} catch (e) {
+  // settings already initialized
+}
 
 export const OperationType = {
   CREATE: 'create',
@@ -40,31 +42,45 @@ export type OperationType = (typeof OperationType)[keyof typeof OperationType];
 
 interface FirestoreErrorInfo {
   error: string;
+  code?: string;
+  details?: any;
+  stack?: string;
   operationType: OperationType;
   path: string | null;
-  authInfo: any;
 }
 
 export function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null): never {
+  const errObj = error as any;
+  const rawMsg = errObj instanceof Error ? errObj.message : String(errObj);
+  let cleanMsg = rawMsg;
+  try {
+    if (rawMsg.startsWith('{')) {
+      const parsed = JSON.parse(rawMsg);
+      cleanMsg = parsed.error || parsed.message || rawMsg;
+    }
+  } catch {}
+
   const errInfo: FirestoreErrorInfo = {
-    error: error instanceof Error ? error.message : String(error),
-    authInfo: {},
+    error: rawMsg,
+    code: errObj?.code || 'UNKNOWN',
+    details: errObj?.details || null,
+    stack: errObj instanceof Error ? errObj.stack : undefined,
     operationType,
     path
   };
-  console.error('Firestore Error: ', JSON.stringify(errInfo));
-  throw new Error(JSON.stringify(errInfo));
+  console.error('Firestore Error: ', JSON.stringify(errInfo, null, 2));
+  throw new Error(`Erreur base de données (${operationType} sur ${path || 'général'}): ${cleanMsg}`);
 }
 
 // ==========================================
-// GENERIC DOCUMENT & COLLECTION HELPERS
+// GENERIC DOCUMENT & COLLECTION HELPERS (Admin SDK)
 // ==========================================
 
 export async function checkDocExists(colPath: string, docId: string): Promise<boolean> {
   try {
-    const docRef = doc(db, colPath, docId);
-    const snap = await getDoc(docRef);
-    return snap.exists();
+    const docRef = db.collection(colPath).doc(docId);
+    const snap = await docRef.get();
+    return snap.exists;
   } catch (error) {
     handleFirestoreError(error, OperationType.GET, `${colPath}/${docId}`);
   }
@@ -72,9 +88,9 @@ export async function checkDocExists(colPath: string, docId: string): Promise<bo
 
 export async function getDocData<T = any>(colPath: string, docId: string): Promise<T | null> {
   try {
-    const docRef = doc(db, colPath, docId);
-    const snap = await getDoc(docRef);
-    return snap.exists() ? (snap.data() as T) : null;
+    const docRef = db.collection(colPath).doc(docId);
+    const snap = await docRef.get();
+    return snap.exists ? (snap.data() as T) : null;
   } catch (error) {
     handleFirestoreError(error, OperationType.GET, `${colPath}/${docId}`);
   }
@@ -82,8 +98,8 @@ export async function getDocData<T = any>(colPath: string, docId: string): Promi
 
 export async function setDocData(colPath: string, docId: string, data: any): Promise<boolean> {
   try {
-    const docRef = doc(db, colPath, docId);
-    await setDoc(docRef, data, { merge: true });
+    const docRef = db.collection(colPath).doc(docId);
+    await docRef.set(data, { merge: true });
     return true;
   } catch (error) {
     handleFirestoreError(error, OperationType.WRITE, `${colPath}/${docId}`);
@@ -92,8 +108,8 @@ export async function setDocData(colPath: string, docId: string, data: any): Pro
 
 export async function updateDocData(colPath: string, docId: string, data: any): Promise<boolean> {
   try {
-    const docRef = doc(db, colPath, docId);
-    await updateDoc(docRef, data);
+    const docRef = db.collection(colPath).doc(docId);
+    await docRef.update(data);
     return true;
   } catch (error) {
     handleFirestoreError(error, OperationType.UPDATE, `${colPath}/${docId}`);
@@ -102,8 +118,8 @@ export async function updateDocData(colPath: string, docId: string, data: any): 
 
 export async function deleteDocData(colPath: string, docId: string): Promise<boolean> {
   try {
-    const docRef = doc(db, colPath, docId);
-    await deleteDoc(docRef);
+    const docRef = db.collection(colPath).doc(docId);
+    await docRef.delete();
     return true;
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, `${colPath}/${docId}`);
@@ -112,9 +128,9 @@ export async function deleteDocData(colPath: string, docId: string): Promise<boo
 
 export async function listDocs<T = any>(colPath: string): Promise<T[]> {
   try {
-    const colRef = collection(db, colPath);
-    const snap = await getDocs(colRef);
-    return snap.docs.map(d => d.data() as T);
+    const colRef = db.collection(colPath);
+    const snap = await colRef.get();
+    return snap.docs.map((d: any) => d.data() as T);
   } catch (error) {
     handleFirestoreError(error, OperationType.LIST, colPath);
   }
@@ -122,19 +138,25 @@ export async function listDocs<T = any>(colPath: string): Promise<T[]> {
 
 export async function queryDocs<T = any>(colPath: string, field: string, op: any, value: any): Promise<T[]> {
   try {
-    const colRef = collection(db, colPath);
-    const q = query(colRef, where(field, op, value));
-    const snap = await getDocs(q);
-    return snap.docs.map(d => d.data() as T);
+    const colRef = db.collection(colPath);
+    const q = colRef.where(field, op, value);
+    const snap = await q.get();
+    return snap.docs.map((d: any) => d.data() as T);
   } catch (error) {
     handleFirestoreError(error, OperationType.LIST, colPath);
   }
 }
 
-// ==========================================
-// 1. ESTABLISHMENTS
-// ==========================================
+// Subcollection Helpers
+export async function listSubcollectionDocs<T = any>(establishmentId: string, subcolName: string): Promise<T[]> {
+  return listDocs<T>(`establishments/${establishmentId}/${subcolName}`);
+}
 
+export async function getSubcollectionDoc<T = any>(establishmentId: string, subcolName: string, docId: string): Promise<T | null> {
+  return getDocData<T>(`establishments/${establishmentId}/${subcolName}`, docId);
+}
+
+// 1. Establishments
 export async function getEstablishment(id: string) {
   return getDocData('establishments', id);
 }
@@ -151,256 +173,339 @@ export async function listEstablishments() {
   return listDocs('establishments');
 }
 
-// ==========================================
-// 2. USERS & AUTHENTICATION
-// ==========================================
-
-export async function getGlobalUser(userId: string) {
-  return getDocData('users', userId);
-}
-
-export async function getTenantUser(establishmentId: string, userId: string) {
-  return getDocData(`establishments/${establishmentId}/users`, userId);
-}
-
-export async function setTenantUser(establishmentId: string, user: any) {
-  // Enregistrement synchronisé : dans le tenant ET dans l'index global pour auth rapide
-  await setDocData(`establishments/${establishmentId}/users`, user.id, user);
-  await setDocData('users', user.id, user);
-  return true;
-}
-
-export async function listTenantUsers(establishmentId: string) {
-  return listDocs(`establishments/${establishmentId}/users`);
-}
-
-export async function findUsersByUsernameOrEmail(identifier: string, establishmentId?: string) {
-  const cleanId = identifier.trim().toLowerCase();
-  try {
-    let usersCol = collection(db, 'users');
-    let q = query(usersCol, where('username', '==', cleanId));
-    let snap = await getDocs(q);
-    let results = snap.docs.map(d => d.data());
-
-    if (results.length === 0) {
-      const qEmail = query(usersCol, where('email', '==', cleanId));
-      const snapEmail = await getDocs(qEmail);
-      results = snapEmail.docs.map(d => d.data());
-    }
-
-    if (establishmentId && results.length > 0) {
-      results = results.filter(u => u.establishment_id === establishmentId);
-    }
-    return results;
-  } catch (error) {
-    handleFirestoreError(error, OperationType.LIST, 'users');
-  }
-}
-
-// ==========================================
-// 3. STUDENTS
-// ==========================================
-
+// 2. Students
 export async function getStudent(establishmentId: string, studentId: string) {
-  return getDocData(`establishments/${establishmentId}/students`, studentId);
+  const subcolDoc = await getSubcollectionDoc(establishmentId, 'students', studentId);
+  if (subcolDoc) return subcolDoc;
+  return getDocData('students', studentId);
 }
 
-export async function setStudent(establishmentId: string, student: any) {
-  return setDocData(`establishments/${establishmentId}/students`, student.id, student);
+export async function setStudent(idOrEstId: string, dataOrNull?: any) {
+  let establishmentId: string | null = null;
+  let studentId: string;
+  let data: any;
+
+  if (dataOrNull) {
+    establishmentId = idOrEstId;
+    data = dataOrNull;
+    studentId = data.id || dataOrNull.id;
+  } else {
+    data = idOrEstId;
+    studentId = data.id;
+    establishmentId = data.establishment_id || null;
+  }
+
+  if (establishmentId && studentId) {
+    await setDocData(`establishments/${establishmentId}/students`, studentId, data);
+  }
+  return setDocData('students', studentId, data);
 }
 
 export async function listStudents(establishmentId: string) {
-  return listDocs(`establishments/${establishmentId}/students`);
+  return listTenantDocs<any>(establishmentId, 'students');
 }
 
-// ==========================================
-// 4. CLASSES & SUBJECTS
-// ==========================================
+// 3. Users & Profiles
+export async function getGlobalUser(id: string) {
+  return getDocData('users', id);
+}
 
+export async function setTenantUser(idOrEstId: string, dataOrNull?: any) {
+  let establishmentId: string | null = null;
+  let userId: string;
+  let data: any;
+
+  if (dataOrNull) {
+    establishmentId = idOrEstId;
+    data = dataOrNull;
+    userId = data.id || dataOrNull.id;
+  } else {
+    data = idOrEstId;
+    userId = data.id;
+    establishmentId = data.establishment_id || null;
+  }
+
+  if (establishmentId && userId) {
+    await setDocData(`establishments/${establishmentId}/users`, userId, data);
+  }
+  return setDocData('users', userId, data);
+}
+
+export async function listTenantUsers(establishmentId: string) {
+  const subcolUsers = await listDocs<any>(`establishments/${establishmentId}/users`);
+  if (subcolUsers && subcolUsers.length > 0) return subcolUsers;
+  return queryDocs('users', 'establishment_id', '==', establishmentId);
+}
+
+export async function findUsersByUsernameOrEmail(username: string, targetEstablishmentId?: string, email?: string) {
+  const cleanUsername = username ? username.trim().toLowerCase() : '';
+  const cleanEmail = email ? email.trim().toLowerCase() : (cleanUsername.includes('@') ? cleanUsername : undefined);
+  const cleanPhone = cleanUsername.replace(/\D/g, '');
+
+  let tenantUsers: any[] = [];
+  if (targetEstablishmentId) {
+    try {
+      tenantUsers = await listTenantUsers(targetEstablishmentId);
+    } catch {}
+  }
+
+  let rootUsers: any[] = [];
+  try {
+    rootUsers = await listDocs<any>('users');
+  } catch {}
+
+  const userMap = new Map<string, any>();
+  for (const u of [...tenantUsers, ...rootUsers]) {
+    if (u && u.id) {
+      userMap.set(u.id, u);
+    }
+  }
+
+  const allUsers = Array.from(userMap.values());
+  return allUsers.filter(u => {
+    const uName = (u.username || '').trim().toLowerCase();
+    const uEmail = (u.email || '').trim().toLowerCase();
+    const uPhone = (u.phone || u.telephone || u.guardian_phone || u.username || '').replace(/\D/g, '');
+
+    const matchUser = (cleanUsername && uName === cleanUsername) ||
+                      (cleanEmail && uEmail === cleanEmail) ||
+                      (cleanUsername && uEmail === cleanUsername) ||
+                      (cleanPhone.length >= 6 && uPhone.length >= 6 && (uPhone === cleanPhone || uPhone.endsWith(cleanPhone) || cleanPhone.endsWith(uPhone)));
+
+    const matchEst = targetEstablishmentId ? (u.establishment_id === targetEstablishmentId) : true;
+
+    return matchUser && matchEst;
+  });
+}
+
+// Generic helper to list documents from both establishment subcollections and root collections
+export async function listTenantDocs<T = any>(establishmentId: string, collectionName: string): Promise<T[]> {
+  let subcolDocs: T[] = [];
+  try {
+    subcolDocs = await listDocs<T>(`establishments/${establishmentId}/${collectionName}`);
+  } catch {}
+
+  let rootDocs: T[] = [];
+  try {
+    rootDocs = await queryDocs<T>(collectionName, 'establishment_id', '==', establishmentId);
+  } catch {}
+
+  const map = new Map<string, T>();
+  for (const doc of [...subcolDocs, ...rootDocs]) {
+    if (doc) {
+      const docId = (doc as any).id;
+      if (docId) {
+        map.set(docId, doc);
+      }
+    }
+  }
+
+  return Array.from(map.values());
+}
+
+// 4. Classes & Subjects
 export async function listClasses(establishmentId: string) {
-  return listDocs(`establishments/${establishmentId}/classes`);
+  return listTenantDocs<any>(establishmentId, 'classes');
 }
 
-export async function setClass(establishmentId: string, classData: any) {
-  return setDocData(`establishments/${establishmentId}/classes`, classData.id, classData);
+export async function setClass(id: string, data: any) {
+  return setDocData('classes', id, data);
 }
 
 export async function listSubjects(establishmentId: string) {
-  return listDocs(`establishments/${establishmentId}/subjects`);
+  return listTenantDocs<any>(establishmentId, 'subjects');
 }
 
-export async function setSubject(establishmentId: string, subjectData: any) {
-  return setDocData(`establishments/${establishmentId}/subjects`, subjectData.id, subjectData);
+export async function setSubject(id: string, data: any) {
+  return setDocData('subjects', id, data);
 }
 
 export async function listClassSubjects(establishmentId: string) {
-  return listDocs(`establishments/${establishmentId}/class_subjects`);
+  return listTenantDocs<any>(establishmentId, 'class_subjects');
 }
 
-export async function setClassSubject(establishmentId: string, csData: any) {
-  return setDocData(`establishments/${establishmentId}/class_subjects`, csData.id, csData);
-}
-
-// ==========================================
-// 5. PAYMENTS & FINANCES
-// ==========================================
-
+// 5. Payments & Finance
 export async function listPayments(establishmentId: string) {
-  return listDocs(`establishments/${establishmentId}/payments`);
+  return listTenantDocs<any>(establishmentId, 'payments');
 }
 
-export async function getPayment(establishmentId: string, paymentId: string) {
-  return getDocData(`establishments/${establishmentId}/payments`, paymentId);
+export async function setPayment(id: string, data: any) {
+  return setDocData('payments', id, data);
 }
 
-export async function setPayment(establishmentId: string, payment: any) {
-  return setDocData(`establishments/${establishmentId}/payments`, payment.id, payment);
+export async function listTariffs(establishmentId: string) {
+  return listTenantDocs<any>(establishmentId, 'school_tariff_plans');
 }
 
-export async function listFeeStructures(establishmentId: string) {
-  return listDocs(`establishments/${establishmentId}/fee_structures`);
+export async function listExpenses(establishmentId: string) {
+  return listTenantDocs<any>(establishmentId, 'expenses');
 }
 
-export async function setFeeStructure(establishmentId: string, fee: any) {
-  return setDocData(`establishments/${establishmentId}/fee_structures`, fee.id, fee);
+export async function listFundInjections(establishmentId: string) {
+  const [injections, reinforcements] = await Promise.all([
+    listTenantDocs<any>(establishmentId, 'fund_injections').catch(() => []),
+    listTenantDocs<any>(establishmentId, 'cash_reinforcements').catch(() => []),
+  ]);
+  const map = new Map<string, any>();
+  for (const doc of [...(injections || []), ...(reinforcements || [])]) {
+    if (doc && doc.id) {
+      map.set(doc.id, doc);
+    }
+  }
+  return Array.from(map.values());
 }
 
-export async function listSchoolTariffPlans(establishmentId: string) {
-  return listDocs(`establishments/${establishmentId}/school_tariff_plans`);
-}
-
-export async function setSchoolTariffPlan(establishmentId: string, plan: any) {
-  return setDocData(`establishments/${establishmentId}/school_tariff_plans`, plan.id, plan);
-}
-
-// ==========================================
-// 6. EVALUATIONS & GRADES
-// ==========================================
-
+// 6. Evaluations & Grades
 export async function listEvaluations(establishmentId: string) {
-  return listDocs(`establishments/${establishmentId}/evaluations`);
+  return listTenantDocs<any>(establishmentId, 'evaluations');
 }
 
-export async function setEvaluation(establishmentId: string, evaluation: any) {
-  return setDocData(`establishments/${establishmentId}/evaluations`, evaluation.id, evaluation);
+export async function setEvaluation(id: string, data: any) {
+  return setDocData('evaluations', id, data);
 }
 
 export async function listGrades(establishmentId: string) {
-  return listDocs(`establishments/${establishmentId}/grades`);
+  return listTenantDocs<any>(establishmentId, 'grades');
 }
 
-export async function setGrade(establishmentId: string, grade: any) {
-  return setDocData(`establishments/${establishmentId}/grades`, grade.id, grade);
+export async function setGrade(id: string, data: any) {
+  return setDocData('grades', id, data);
 }
 
-// ==========================================
-// 7. ATTENDANCE & DISCIPLINE
-// ==========================================
-
+// 7. Attendance, Course Logs, Schedules & Payroll
 export async function listStudentAttendances(establishmentId: string) {
-  return listDocs(`establishments/${establishmentId}/student_attendances`);
+  return listTenantDocs<any>(establishmentId, 'student_attendances');
 }
 
-export async function setStudentAttendance(establishmentId: string, attendance: any) {
-  return setDocData(`establishments/${establishmentId}/student_attendances`, attendance.id, attendance);
+export async function listStudentCourseAttendances(establishmentId: string) {
+  return listTenantDocs<any>(establishmentId, 'student_course_attendances');
 }
 
-export async function listTeacherAttendances(establishmentId: string) {
-  return listDocs(`establishments/${establishmentId}/teacher_attendances`);
+export async function setStudentCourseAttendance(establishmentId: string, id: string, data: any) {
+  if (establishmentId && id) {
+    await setDocData(`establishments/${establishmentId}/student_course_attendances`, id, data);
+  }
+  return setDocData('student_course_attendances', id, data);
 }
 
-export async function setTeacherAttendance(establishmentId: string, att: any) {
-  return setDocData(`establishments/${establishmentId}/teacher_attendances`, att.id, att);
+export async function listStudentSessionAttendances(establishmentId: string) {
+  return listTenantDocs<any>(establishmentId, 'student_session_attendances');
+}
+
+export async function setStudentAttendance(id: string, data: any) {
+  return setDocData('student_attendances', id, data);
+}
+
+export async function listTeacherCheckins(establishmentId: string) {
+  return listTenantDocs<any>(establishmentId, 'teacher_attendances');
+}
+
+export async function listPayrollRecords(establishmentId: string) {
+  return listTenantDocs<any>(establishmentId, 'payroll_records');
+}
+
+export async function setPayrollRecord(id: string, data: any) {
+  return setDocData('payroll_records', id, data);
+}
+
+export async function listLessonLogs(establishmentId: string) {
+  return listTenantDocs<any>(establishmentId, 'lesson_logs');
+}
+
+export async function setLessonLog(id: string, data: any) {
+  return setDocData('lesson_logs', id, data);
+}
+
+export async function listSchedules(establishmentId: string) {
+  return listTenantDocs<any>(establishmentId, 'teacher_schedules');
 }
 
 export async function listDisciplinaryIncidents(establishmentId: string) {
-  return listDocs(`establishments/${establishmentId}/disciplinary_incidents`);
+  return listTenantDocs<any>(establishmentId, 'disciplinary_incidents');
 }
 
-export async function setDisciplinaryIncident(establishmentId: string, incident: any) {
-  return setDocData(`establishments/${establishmentId}/disciplinary_incidents`, incident.id, incident);
+export async function listComplaints(establishmentId: string) {
+  return listTenantDocs<any>(establishmentId, 'complaints');
 }
-
-// ==========================================
-// 8. PAYROLL RECORDS
-// ==========================================
-
-export async function listPayrollRecords(establishmentId: string) {
-  return listDocs(`establishments/${establishmentId}/payroll_records`);
-}
-
-export async function setPayrollRecord(establishmentId: string, payroll: any) {
-  return setDocData(`establishments/${establishmentId}/payroll_records`, payroll.id, payroll);
-}
-
-// ==========================================
-// 9. LESSON LOGS (CAHIER DE TEXTE)
-// ==========================================
-
-export async function listLessonLogs(establishmentId: string) {
-  return listDocs(`establishments/${establishmentId}/lesson_logs`);
-}
-
-export async function setLessonLog(establishmentId: string, log: any) {
-  return setDocData(`establishments/${establishmentId}/lesson_logs`, log.id, log);
-}
-
-// ==========================================
-// 10. ANNOUNCEMENTS & PARENT-STUDENT
-// ==========================================
 
 export async function listAnnouncements(establishmentId: string) {
-  return listDocs(`establishments/${establishmentId}/school_announcements`);
-}
-
-export async function setAnnouncement(establishmentId: string, ann: any) {
-  return setDocData(`establishments/${establishmentId}/school_announcements`, ann.id, ann);
+  return listTenantDocs<any>(establishmentId, 'school_announcements');
 }
 
 export async function listParentStudents(establishmentId: string) {
-  return listDocs(`establishments/${establishmentId}/parent_students`);
+  return listTenantDocs<any>(establishmentId, 'parent_students');
 }
 
-export async function setParentStudent(establishmentId: string, ps: any) {
-  return setDocData(`establishments/${establishmentId}/parent_students`, ps.id, ps);
+// 8. Subscriptions & Audit logs
+export async function getSubscription(establishmentId: string) {
+  return getDocData('subscriptions', establishmentId);
 }
 
-// ==========================================
-// 11. GLOBAL PLATFORM ENTITIES
-// ==========================================
-
-export async function listSubscriptions() {
-  return listDocs('subscriptions');
+export async function setSubscription(establishmentId: string, data: any) {
+  return setDocData('subscriptions', establishmentId, data);
 }
 
-export async function getSubscription(subId: string) {
-  return getDocData('subscriptions', subId);
+export async function logFirestoreAudit(id: string, data: any) {
+  return setDocData('audit_logs_firestore', id, data);
 }
 
-export async function setSubscription(subscription: any) {
-  return setDocData('subscriptions', subscription.id, subscription);
+// 9. Guardians
+export function normalizePhone(phone: string | null | undefined): string {
+  if (!phone) return '';
+  const cleaned = phone.replace(/[^0-9+]/g, '');
+  if (!cleaned) return '';
+  if (cleaned.startsWith('+242')) return cleaned;
+  if (cleaned.startsWith('242')) return '+' + cleaned;
+  if (cleaned.startsWith('0')) return '+242' + cleaned.substring(1);
+  return '+242' + cleaned;
 }
 
-export async function listCreationAuthorizations() {
-  return listDocs('creation_authorizations');
+export async function listGuardians(establishmentId: string) {
+  return listTenantDocs<any>(establishmentId, 'guardians');
 }
 
-export async function setCreationAuthorization(authData: any) {
-  return setDocData('creation_authorizations', authData.id, authData);
+export async function getGuardian(establishmentId: string, guardianId: string) {
+  const subcolDoc = await getSubcollectionDoc(establishmentId, 'guardians', guardianId);
+  if (subcolDoc) return subcolDoc;
+  return getDocData('guardians', guardianId);
 }
 
-export async function listPedagogicalReferences() {
-  return listDocs('pedagogical_references');
-}
-
-export async function setPedagogicalReference(refData: any) {
-  return setDocData('pedagogical_references', refData.id, refData);
-}
-
-export async function logFirestoreAudit(establishmentId: string, auditData: any) {
-  try {
-    await setDocData(`establishments/${establishmentId}/audit_logs`, auditData.id, auditData);
-  } catch (error) {
-    console.error('Audit log Firestore error:', error);
+export async function setGuardian(establishmentId: string, guardianId: string, data: any) {
+  if (establishmentId && guardianId) {
+    await setDocData(`establishments/${establishmentId}/guardians`, guardianId, data);
   }
+  return setDocData('guardians', guardianId, data);
 }
+
+export async function queryGuardiansByPhone(establishmentId: string, phone: string) {
+  const normPhone = normalizePhone(phone);
+  if (!normPhone) return [];
+  const allGuardians = await listGuardians(establishmentId);
+  return allGuardians.filter((g: any) => normalizePhone(g.phone) === normPhone);
+}
+
+// Curriculum Programs (Référentiel des programmes & manuels)
+export async function listCurriculumPrograms(establishmentId: string) {
+  return listTenantDocs<any>(establishmentId, 'curriculum_programs');
+}
+
+export async function getCurriculumProgram(establishmentId: string, programId: string) {
+  const subcolDoc = await getSubcollectionDoc(establishmentId, 'curriculum_programs', programId);
+  if (subcolDoc) return subcolDoc;
+  return getDocData('curriculum_programs', programId);
+}
+
+export async function setCurriculumProgram(establishmentId: string, programId: string, data: any) {
+  if (establishmentId && programId) {
+    await setDocData(`establishments/${establishmentId}/curriculum_programs`, programId, data);
+  }
+  return setDocData('curriculum_programs', programId, data);
+}
+
+export async function deleteCurriculumProgramDoc(establishmentId: string, programId: string) {
+  if (establishmentId && programId) {
+    await deleteDocData(`establishments/${establishmentId}/curriculum_programs`, programId);
+  }
+  return deleteDocData('curriculum_programs', programId);
+}
+

@@ -20,11 +20,14 @@ import {
   Calendar,
   Sparkles,
   UserCheck,
-  ChevronDown
+  ChevronDown,
+  Download,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext.tsx';
 import { api } from '../lib/api.ts';
 import { CourseSchedule, SchoolClass, Subject, User, AuditLog } from '../types.ts';
+import { printDocument, downloadPdf } from '../utils/printPdfUtils.ts';
+import { PrintHeader } from '../components/PrintHeader.tsx';
 
 const DAYS_OF_WEEK = [
   { id: 1, name: 'Lundi' },
@@ -61,6 +64,7 @@ export const TimetableView: React.FC = () => {
 
   // Filters & View Mode
   const [viewMode, setViewMode] = useState<'WEEKLY' | 'DAILY'>('WEEKLY');
+  const [teacherDisplayMode, setTeacherDisplayMode] = useState<'BY_DAY' | 'BY_CLASS' | 'WEEKLY'>('BY_DAY');
   const [selectedDay, setSelectedDay] = useState<number>(() => {
     const today = new Date().getDay(); // 0 is Sunday, 1 is Monday ... 6 is Saturday
     return today >= 1 && today <= 6 ? today : 1;
@@ -169,12 +173,20 @@ export const TimetableView: React.FC = () => {
         if (statusFilter !== 'ALL') {
           params.status = statusFilter;
         }
+      } else if (isEnseignant) {
+        // Teacher strictly requests their own teacherId
+        params.teacherId = user?.id;
       } else if (isParent && selectedChildId) {
         params.studentId = selectedChildId;
       }
 
       const data = await api.getSchedules(params);
-      setSchedules(data || []);
+      let list = data || [];
+      if (isEnseignant && user?.id) {
+        // Strict client-side filter to strictly match this teacher's user.id
+        list = list.filter((s: CourseSchedule) => String(s.teacher_id) === String(user.id));
+      }
+      setSchedules(list);
     } catch (err: any) {
       setError(err.message || 'Erreur lors du chargement des cours.');
     }
@@ -203,18 +215,106 @@ export const TimetableView: React.FC = () => {
 
   // Filtered schedules for current view
   const filteredSchedules = useMemo(() => {
-    return schedules.filter((s) => {
+    let list = schedules;
+    if (isEnseignant && user?.id) {
+      list = list.filter((s) => String(s.teacher_id) === String(user.id));
+    }
+    return list.filter((s) => {
       // Cycle filter
       if (cycleFilter !== 'ALL' && s.cycle_code !== cycleFilter) {
         return false;
       }
-      // Daily view filter
-      if (viewMode === 'DAILY' && s.day_of_week !== selectedDay) {
+      // Daily view filter for non-teachers or daily view
+      if (!isEnseignant && viewMode === 'DAILY' && s.day_of_week !== selectedDay) {
         return false;
       }
       return true;
     });
-  }, [schedules, cycleFilter, viewMode, selectedDay]);
+  }, [schedules, cycleFilter, viewMode, selectedDay, isEnseignant, user?.id]);
+
+  // Compute "Prochain cours" banner for teacher based on Brazzaville Time
+  const teacherNextCourse = useMemo(() => {
+    if (!isEnseignant || schedules.length === 0) return null;
+
+    const now = new Date();
+    // Brazzaville day: 1 = Lundi, ..., 6 = Samedi, 7 = Dimanche
+    const bzDay = now.getDay() === 0 ? 7 : now.getDay();
+    const curTime = brazzavilleTime || `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+
+    // 1. Ongoing course today
+    const ongoing = schedules.find(
+      (s) => Number(s.day_of_week) === bzDay && curTime >= s.start_time && curTime < s.end_time
+    );
+    if (ongoing) {
+      return {
+        isOngoing: true,
+        text: `En cours : ${ongoing.class_name || 'Classe'}, ${ongoing.subject_name || 'Matière'}, aujourd'hui de ${ongoing.start_time} à ${ongoing.end_time} (${ongoing.room ? `salle ${ongoing.room}` : 'salle principale'})`,
+      };
+    }
+
+    // 2. Next upcoming course today
+    const upcomingToday = schedules
+      .filter((s) => Number(s.day_of_week) === bzDay && curTime < s.start_time)
+      .sort((a, b) => a.start_time.localeCompare(b.start_time))[0];
+
+    if (upcomingToday) {
+      return {
+        isOngoing: false,
+        text: `Prochain cours : ${upcomingToday.class_name || 'Classe'}, ${upcomingToday.subject_name || 'Matière'}, aujourd'hui à ${upcomingToday.start_time} (${upcomingToday.room ? `salle ${upcomingToday.room}` : 'salle principale'})`,
+      };
+    }
+
+    // 3. Next upcoming course in following days
+    const dayNamesMap: Record<number, string> = {
+      1: 'Lundi', 2: 'Mardi', 3: 'Mercredi', 4: 'Jeudi', 5: 'Vendredi', 6: 'Samedi', 7: 'Dimanche'
+    };
+
+    for (let offset = 1; offset <= 6; offset++) {
+      let targetDay = ((bzDay - 1 + offset) % 7) + 1;
+      const daySlots = schedules
+        .filter((s) => Number(s.day_of_week) === targetDay)
+        .sort((a, b) => a.start_time.localeCompare(b.start_time));
+
+      if (daySlots.length > 0) {
+        const firstSlot = daySlots[0];
+        const dayLabel = offset === 1 ? 'Demain' : dayNamesMap[targetDay] || 'Jour suivant';
+        return {
+          isOngoing: false,
+          text: `Prochain cours : ${firstSlot.class_name || 'Classe'}, ${firstSlot.subject_name || 'Matière'}, ${dayLabel} à ${firstSlot.start_time} (${firstSlot.room ? `salle ${firstSlot.room}` : 'salle principale'})`,
+        };
+      }
+    }
+
+    return { isOngoing: false, text: 'Aucun cours programmé' };
+  }, [isEnseignant, schedules, brazzavilleTime]);
+
+  // Compute teacher summary metrics
+  const teacherSummary = useMemo(() => {
+    if (!isEnseignant) return null;
+
+    let totalMinutes = 0;
+    const classSet = new Set<string>();
+
+    schedules.forEach((s) => {
+      if (s.class_name) classSet.add(s.class_name);
+      else if (s.class_id) classSet.add(s.class_id);
+
+      if (s.start_time && s.end_time) {
+        const [h1, m1] = s.start_time.split(':').map(Number);
+        const [h2, m2] = s.end_time.split(':').map(Number);
+        const dur = (h2 * 60 + m2) - (h1 * 60 + m1);
+        if (dur > 0) totalMinutes += dur;
+      }
+    });
+
+    const hoursCount = (totalMinutes / 60).toFixed(totalMinutes % 60 === 0 ? 0 : 1);
+
+    return {
+      totalHours: `${hoursCount}h`,
+      totalClasses: classSet.size,
+      totalCourses: schedules.length,
+    };
+  }, [isEnseignant, schedules]);
 
   // Compute live status for Surveillant & Direction
   const getCourseLiveStatus = (s: CourseSchedule) => {
@@ -289,7 +389,7 @@ export const TimetableView: React.FC = () => {
     }
 
     if (formStartTime >= formEndTime) {
-      setError("L'heure de début doit être strictement antérieure à l'heure de fin.");
+      setError("L'heure de début doit être strictly antérieure à l'heure de fin.");
       return;
     }
 
@@ -362,9 +462,61 @@ export const TimetableView: React.FC = () => {
     }
   };
 
+  const selectedClass = classes.find((c) => c.id === selectedClassId);
+  const selectedTeacher = teachers.find((t) => t.id === selectedTeacherId);
+
+  const scheduleInfo = useMemo(() => {
+    let title = 'EMPLOI DU TEMPS DES COURS';
+    let fileSlug = 'Emploi_du_temps';
+
+    if (isEnseignant) {
+      const cleanName = (user?.full_name || 'Enseignant').trim();
+      title = `Emploi du temps de ${cleanName}`;
+      fileSlug = `Emploi_du_temps_${cleanName.replace(/\s+/g, '_')}`;
+    } else if (isEleve) {
+      const clsName = classes.find((c) => c.id === user?.class_id)?.name || 'Classe';
+      title = `Emploi du temps : ${clsName}`;
+      fileSlug = `Emploi_du_temps_${clsName.replace(/\s+/g, '_')}`;
+    } else if (isParent) {
+      const child = parentChildren.find((c) => c.id === selectedChildId);
+      const clsName = child?.class_name || 'Classe';
+      title = `Emploi du temps : ${clsName} (${child?.first_name || ''})`;
+      fileSlug = `Emploi_du_temps_${clsName.replace(/\s+/g, '_')}`;
+    } else if (filterMode === 'CLASS' && selectedClass) {
+      title = `Emploi du temps : ${selectedClass.name}`;
+      fileSlug = `Emploi_du_temps_${selectedClass.name.replace(/\s+/g, '_')}`;
+    } else if (filterMode === 'TEACHER' && selectedTeacher) {
+      title = `Emploi du temps : ${selectedTeacher.full_name}`;
+      fileSlug = `Emploi_du_temps_${selectedTeacher.full_name.replace(/\s+/g, '_')}`;
+    }
+
+    const year = establishment?.academic_year || '2026-2027';
+    return {
+      title: `${title}, année ${year}`,
+      docTitle: title.toUpperCase(),
+      filename: `${fileSlug}_${year}.pdf`,
+    };
+  }, [
+    isEnseignant,
+    isEleve,
+    isParent,
+    user,
+    classes,
+    parentChildren,
+    selectedChildId,
+    filterMode,
+    selectedClass,
+    selectedTeacher,
+    establishment,
+  ]);
+
   // Print schedule
   const handlePrint = () => {
-    window.print();
+    printDocument('printable-timetable', scheduleInfo.title);
+  };
+
+  const handleDownloadPdf = () => {
+    downloadPdf('printable-timetable', scheduleInfo.filename);
   };
 
   // Computed publication stats for the current view
@@ -374,7 +526,7 @@ export const TimetableView: React.FC = () => {
   return (
     <div className="p-4 sm:p-6 lg:p-8 space-y-6 max-w-7xl mx-auto">
       {/* HEADER SECTION */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-4 border-b border-slate-800">
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-4 border-b border-slate-800 no-print">
         <div>
           <div className="flex items-center space-x-3">
             <div className="w-10 h-10 rounded-xl bg-cyan-600/20 text-cyan-400 flex items-center justify-center border border-cyan-500/30">
@@ -382,7 +534,9 @@ export const TimetableView: React.FC = () => {
             </div>
             <div>
               <h1 className="text-xl sm:text-2xl font-bold text-white flex items-center gap-2">
-                {isEnseignant || isEleve
+                {isEnseignant
+                  ? `Mon emploi du temps (${user?.full_name || 'Enseignant'})`
+                  : isEleve
                   ? 'Mon emploi du temps'
                   : isParent
                   ? 'Emploi du temps de mon enfant'
@@ -404,7 +558,7 @@ export const TimetableView: React.FC = () => {
                 )}
               </h1>
               <p className="text-xs sm:text-sm text-slate-400 mt-0.5">
-                {establishment?.name || 'Établissement scolaire'} — Année académique {establishment?.academic_year || '2025-2026'}
+                {establishment?.name || 'Établissement scolaire'} — Année académique {establishment?.academic_year || '2026-2027'}
                 {brazzavilleTime && (
                   <span className="ml-2 font-mono text-cyan-400">
                     (Heure Congo-Brazzaville : {brazzavilleTime})
@@ -416,14 +570,23 @@ export const TimetableView: React.FC = () => {
         </div>
 
         {/* TOP ACTIONS */}
-        <div className="flex flex-wrap items-center gap-2.5">
+        <div className="flex flex-wrap items-center gap-2.5 no-print">
           <button
             onClick={handlePrint}
-            className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center space-x-1.5 transition"
-            title="Imprimer ou exporter en PDF"
+            className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-semibold flex items-center space-x-1.5 transition cursor-pointer"
+            title="Imprimer l'emploi du temps"
           >
             <Printer className="w-4 h-4 text-slate-400" />
-            <span>Imprimer / PDF</span>
+            <span>Imprimer</span>
+          </button>
+
+          <button
+            onClick={handleDownloadPdf}
+            className="px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold flex items-center space-x-1.5 transition shadow cursor-pointer"
+            title="Télécharger en PDF"
+          >
+            <Download className="w-4 h-4 text-white" />
+            <span>Télécharger PDF</span>
           </button>
 
           {canManage && (
@@ -464,7 +627,7 @@ export const TimetableView: React.FC = () => {
 
       {/* FEEDBACK ALERTS */}
       {error && (
-        <div className="p-3.5 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs flex items-center justify-between">
+        <div className="p-3.5 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 text-xs flex items-center justify-between no-print">
           <div className="flex items-center space-x-2">
             <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
             <span>{error}</span>
@@ -476,7 +639,7 @@ export const TimetableView: React.FC = () => {
       )}
 
       {success && (
-        <div className="p-3.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs flex items-center justify-between">
+        <div className="p-3.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs flex items-center justify-between no-print">
           <div className="flex items-center space-x-2">
             <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
             <span>{success}</span>
@@ -487,9 +650,61 @@ export const TimetableView: React.FC = () => {
         </div>
       )}
 
+      {/* BANDEAU "PROCHAIN COURS" POUR L'ENSEIGNANT CONNECTÉ (EXCLU DE L'IMPRESSION/PDF) */}
+      {isEnseignant && teacherNextCourse && (
+        <div className="bg-gradient-to-r from-indigo-950 via-slate-900 to-indigo-950 border border-indigo-500/30 rounded-2xl p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs text-indigo-100 shadow-lg no-print print:hidden">
+          <div className="flex items-center space-x-3">
+            <div className={`p-2.5 rounded-xl border ${teacherNextCourse.isOngoing ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-300 animate-pulse' : 'bg-cyan-500/20 border-cyan-500/40 text-cyan-300'}`}>
+              <Clock className="w-5 h-5" />
+            </div>
+            <div>
+              <span className="text-[10px] font-extrabold uppercase tracking-wider text-indigo-300 block">
+                {teacherNextCourse.isOngoing ? 'EN COURS ACTUELLEMENT' : 'STATUT DU PLANNING'}
+              </span>
+              <p className="font-bold text-sm text-white mt-0.5">
+                {teacherNextCourse.text}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* RÉSUMÉ CARTE ENSEIGNANT (EXCLU DE L'IMPRESSION/PDF) */}
+      {isEnseignant && teacherSummary && (
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 no-print">
+          <div className="bg-slate-900 border border-slate-800 p-4 rounded-2xl flex items-center space-x-3">
+            <div className="p-3 bg-cyan-500/10 border border-cyan-500/30 rounded-xl text-cyan-400">
+              <Clock className="w-5 h-5" />
+            </div>
+            <div>
+              <span className="text-[10px] uppercase font-bold text-slate-400 block">Volume horaire / sem.</span>
+              <span className="text-xl font-black text-cyan-300 font-mono mt-0.5 block">{teacherSummary.totalHours}</span>
+            </div>
+          </div>
+          <div className="bg-slate-900 border border-slate-800 p-4 rounded-2xl flex items-center space-x-3">
+            <div className="p-3 bg-indigo-500/10 border border-indigo-500/30 rounded-xl text-indigo-400">
+              <BookOpen className="w-5 h-5" />
+            </div>
+            <div>
+              <span className="text-[10px] uppercase font-bold text-slate-400 block">Classes attribuées</span>
+              <span className="text-xl font-black text-indigo-300 font-mono mt-0.5 block">{teacherSummary.totalClasses}</span>
+            </div>
+          </div>
+          <div className="bg-slate-900 border border-slate-800 p-4 rounded-2xl flex items-center space-x-3">
+            <div className="p-3 bg-emerald-500/10 border border-emerald-500/30 rounded-xl text-emerald-400">
+              <Calendar className="w-5 h-5" />
+            </div>
+            <div>
+              <span className="text-[10px] uppercase font-bold text-slate-400 block">Séances programmées</span>
+              <span className="text-xl font-black text-emerald-300 font-mono mt-0.5 block">{teacherSummary.totalCourses}</span>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* SURVEILLANT REAL-TIME MONITORING CARDS */}
       {(isSurveillant || canManage) && (
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 bg-slate-900/90 border border-slate-800 p-3.5 rounded-2xl">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 bg-slate-900/90 border border-slate-800 p-3.5 rounded-2xl no-print">
           <div className="p-3 rounded-xl bg-slate-800/60 border border-slate-700/60">
             <p className="text-[10px] uppercase font-bold text-slate-400">Séances programmées aujourd'hui</p>
             <p className="text-xl font-bold text-white mt-1">
@@ -521,7 +736,7 @@ export const TimetableView: React.FC = () => {
       )}
 
       {/* CONTROLS & FILTER TOOLBAR */}
-      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-4">
+      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-4 no-print">
         {/* Parent child switcher */}
         {isParent && parentChildren.length > 0 && (
           <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 p-3 bg-indigo-950/40 border border-indigo-800/40 rounded-xl">
@@ -548,160 +763,402 @@ export const TimetableView: React.FC = () => {
           </div>
         )}
 
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          {/* View Mode Toggle: Weekly vs Daily */}
-          <div className="flex items-center bg-slate-800 p-1 rounded-xl border border-slate-700">
-            <button
-              onClick={() => setViewMode('WEEKLY')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
-                viewMode === 'WEEKLY'
-                  ? 'bg-indigo-600 text-white shadow'
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              Vue Semaine (Grille)
-            </button>
-            <button
-              onClick={() => setViewMode('DAILY')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
-                viewMode === 'DAILY'
-                  ? 'bg-indigo-600 text-white shadow'
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              Vue Journalière (Agenda)
-            </button>
-          </div>
-
-          {/* Day of Week Selector (active in Daily mode) */}
-          {viewMode === 'DAILY' && (
-            <div className="flex items-center space-x-1 overflow-x-auto pb-1 sm:pb-0">
-              {DAYS_OF_WEEK.map((d) => (
-                <button
-                  key={d.id}
-                  onClick={() => setSelectedDay(d.id)}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition whitespace-nowrap ${
-                    selectedDay === d.id
-                      ? 'bg-cyan-600 text-white shadow'
-                      : 'bg-slate-800 text-slate-400 hover:text-white'
-                  }`}
-                >
-                  {d.name}
-                </button>
-              ))}
-            </div>
-          )}
-
-          {/* Schoolwide filters for DG, DE, Promoteur, Surveillant */}
-          {(canManage || isPromoteur || isSurveillant) && (
-            <div className="flex flex-wrap items-center gap-2">
-              {/* Filter By Mode */}
-              <div className="flex items-center bg-slate-800/80 p-0.5 rounded-lg border border-slate-700 text-xs">
-                <button
-                  onClick={() => setFilterMode('CLASS')}
-                  className={`px-2.5 py-1 rounded-md font-semibold transition ${
-                    filterMode === 'CLASS' ? 'bg-slate-700 text-white' : 'text-slate-400'
-                  }`}
-                >
-                  Par Classe
-                </button>
-                <button
-                  onClick={() => setFilterMode('TEACHER')}
-                  className={`px-2.5 py-1 rounded-md font-semibold transition ${
-                    filterMode === 'TEACHER' ? 'bg-slate-700 text-white' : 'text-slate-400'
-                  }`}
-                >
-                  Par Enseignant
-                </button>
-              </div>
-
-              {/* Class Dropdown */}
-              {filterMode === 'CLASS' ? (
-                <select
-                  value={selectedClassId}
-                  onChange={(e) => setSelectedClassId(e.target.value)}
-                  className="bg-slate-800 border border-slate-700 text-slate-200 rounded-lg px-3 py-1.5 text-xs font-medium focus:ring-1 focus:ring-indigo-500"
-                >
-                  {classes.map((cls) => (
-                    <option key={cls.id} value={cls.id}>
-                      {cls.name} ({cls.cycle_code}{cls.serie_code ? ` - Série ${cls.serie_code}` : ''})
-                    </option>
-                  ))}
-                </select>
-              ) : (
-                <select
-                  value={selectedTeacherId}
-                  onChange={(e) => setSelectedTeacherId(e.target.value)}
-                  className="bg-slate-800 border border-slate-700 text-slate-200 rounded-lg px-3 py-1.5 text-xs font-medium focus:ring-1 focus:ring-indigo-500"
-                >
-                  <option value="">-- Choisir un enseignant --</option>
-                  {teachers.map((t) => (
-                    <option key={t.id} value={t.id}>
-                      {t.full_name} ({t.username})
-                    </option>
-                  ))}
-                </select>
-              )}
-
-              {/* Cycle Filter */}
-              <select
-                value={cycleFilter}
-                onChange={(e) => setCycleFilter(e.target.value)}
-                className="bg-slate-800 border border-slate-700 text-slate-300 rounded-lg px-2.5 py-1.5 text-xs focus:ring-1 focus:ring-indigo-500"
+        {/* Teacher Display Mode Switcher (Par Jour / Par Classe / Grille Semaine) */}
+        {isEnseignant ? (
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center bg-slate-800 p-1 rounded-xl border border-slate-700">
+              <button
+                onClick={() => setTeacherDisplayMode('BY_DAY')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer ${
+                  teacherDisplayMode === 'BY_DAY'
+                    ? 'bg-indigo-600 text-white shadow'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
               >
-                <option value="ALL">Tous cycles</option>
-                <option value="PRE_SCOLAIRE">Préscolaire</option>
-                <option value="PRIMAIRE">Primaire</option>
-                <option value="COLLEGE">Collège</option>
-                <option value="LYCEE">Lycée</option>
-              </select>
+                Par jour
+              </button>
+              <button
+                onClick={() => setTeacherDisplayMode('BY_CLASS')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer ${
+                  teacherDisplayMode === 'BY_CLASS'
+                    ? 'bg-indigo-600 text-white shadow'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                Par classe
+              </button>
+              <button
+                onClick={() => setTeacherDisplayMode('WEEKLY')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer ${
+                  teacherDisplayMode === 'WEEKLY'
+                    ? 'bg-indigo-600 text-white shadow'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                Grille de la semaine
+              </button>
+            </div>
 
-              {/* Publication Status Filter (DG/DE only) */}
-              {canManage && (
+            <span className="text-xs text-slate-400 font-medium">
+              Affichage sécurisé : <strong className="text-indigo-300">{user?.full_name}</strong>
+            </span>
+          </div>
+        ) : (
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            {/* View Mode Toggle: Weekly vs Daily for Direction / Parents / Eleves */}
+            <div className="flex items-center bg-slate-800 p-1 rounded-xl border border-slate-700">
+              <button
+                onClick={() => setViewMode('WEEKLY')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
+                  viewMode === 'WEEKLY'
+                    ? 'bg-indigo-600 text-white shadow'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                Vue Semaine (Grille)
+              </button>
+              <button
+                onClick={() => setViewMode('DAILY')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
+                  viewMode === 'DAILY'
+                    ? 'bg-indigo-600 text-white shadow'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                Vue Journalière (Agenda)
+              </button>
+            </div>
+
+            {/* Day of Week Selector (active in Daily mode) */}
+            {viewMode === 'DAILY' && (
+              <div className="flex items-center space-x-1 overflow-x-auto pb-1 sm:pb-0">
+                {DAYS_OF_WEEK.map((d) => (
+                  <button
+                    key={d.id}
+                    onClick={() => setSelectedDay(d.id)}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition whitespace-nowrap ${
+                      selectedDay === d.id
+                        ? 'bg-cyan-600 text-white shadow'
+                        : 'bg-slate-800 text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    {d.name}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {/* Schoolwide filters for DG, DE, Promoteur, Surveillant */}
+            {(canManage || isPromoteur || isSurveillant) && (
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="flex items-center bg-slate-800/80 p-0.5 rounded-lg border border-slate-700 text-xs">
+                  <button
+                    onClick={() => setFilterMode('CLASS')}
+                    className={`px-2.5 py-1 rounded-md font-semibold transition ${
+                      filterMode === 'CLASS' ? 'bg-slate-700 text-white' : 'text-slate-400'
+                    }`}
+                  >
+                    Par Classe
+                  </button>
+                  <button
+                    onClick={() => setFilterMode('TEACHER')}
+                    className={`px-2.5 py-1 rounded-md font-semibold transition ${
+                      filterMode === 'TEACHER' ? 'bg-slate-700 text-white' : 'text-slate-400'
+                    }`}
+                  >
+                    Par Enseignant
+                  </button>
+                </div>
+
+                {filterMode === 'CLASS' ? (
+                  <select
+                    value={selectedClassId}
+                    onChange={(e) => setSelectedClassId(e.target.value)}
+                    className="bg-slate-800 border border-slate-700 text-slate-200 rounded-lg px-3 py-1.5 text-xs font-medium focus:ring-1 focus:ring-indigo-500"
+                  >
+                    {classes.map((cls) => (
+                      <option key={cls.id} value={cls.id}>
+                        {cls.name} ({cls.cycle_code}{cls.serie_code ? ` - Série ${cls.serie_code}` : ''})
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <select
+                    value={selectedTeacherId}
+                    onChange={(e) => setSelectedTeacherId(e.target.value)}
+                    className="bg-slate-800 border border-slate-700 text-slate-200 rounded-lg px-3 py-1.5 text-xs font-medium focus:ring-1 focus:ring-indigo-500"
+                  >
+                    <option value="">-- Choisir un enseignant --</option>
+                    {teachers.map((t) => (
+                      <option key={t.id} value={t.id}>
+                        {t.full_name} ({t.username})
+                      </option>
+                    ))}
+                  </select>
+                )}
+
                 <select
-                  value={statusFilter}
-                  onChange={(e) => setStatusFilter(e.target.value as any)}
+                  value={cycleFilter}
+                  onChange={(e) => setCycleFilter(e.target.value)}
                   className="bg-slate-800 border border-slate-700 text-slate-300 rounded-lg px-2.5 py-1.5 text-xs focus:ring-1 focus:ring-indigo-500"
                 >
-                  <option value="ALL">Statut : Tous</option>
-                  <option value="PUBLISHED">Publiés uniquement</option>
-                  <option value="DRAFT">Brouillons uniquement</option>
+                  <option value="ALL">Tous cycles</option>
+                  <option value="PRE_SCOLAIRE">Préscolaire</option>
+                  <option value="PRIMAIRE">Primaire</option>
+                  <option value="COLLEGE">Collège</option>
+                  <option value="LYCEE">Lycée</option>
                 </select>
-              )}
-            </div>
-          )}
-        </div>
+
+                {canManage && (
+                  <select
+                    value={statusFilter}
+                    onChange={(e) => setStatusFilter(e.target.value as any)}
+                    className="bg-slate-800 border border-slate-700 text-slate-300 rounded-lg px-2.5 py-1.5 text-xs focus:ring-1 focus:ring-indigo-500"
+                  >
+                    <option value="ALL">Statut : Tous</option>
+                    <option value="PUBLISHED">Publiés uniquement</option>
+                    <option value="DRAFT">Brouillons uniquement</option>
+                  </select>
+                )}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
-      {/* SCHEDULE DISPLAY CONTAINER */}
-      {loading ? (
-        <div className="p-12 text-center text-slate-400">
-          <div className="w-8 h-8 border-2 border-cyan-500 border-t-transparent rounded-full animate-spin mx-auto mb-3" />
-          <p className="text-xs font-semibold">Chargement de l'emploi du temps...</p>
+      {/* SCHEDULE DISPLAY CONTAINER (ISOLÉ POUR IMPRESSION ET EXPORT PDF) */}
+      <div id="printable-timetable" className="printable-document bg-white text-slate-900 p-6 rounded-2xl shadow-md space-y-4">
+        <div className="mb-4">
+          <PrintHeader
+            establishment={establishment}
+            title={isEnseignant ? `EMPLOI DU TEMPS DE ${user?.full_name?.toUpperCase()}` : isEleve ? 'EMPLOI DU TEMPS PERSONNEL' : isParent ? "EMPLOI DU TEMPS DE L'ENFANT" : 'EMPLOI DU TEMPS DES COURS'}
+            subtitle={`Année scolaire ${establishment?.academic_year || '2026-2027'} • Édité le ${new Date().toLocaleDateString('fr-FR')} à ${new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })}`}
+          />
         </div>
-      ) : filteredSchedules.length === 0 ? (
-        <div className="p-12 bg-slate-900 border border-slate-800 rounded-2xl text-center text-slate-400 space-y-3">
-          <CalendarDays className="w-12 h-12 mx-auto text-slate-600" />
-          <p className="text-sm font-semibold text-slate-300">Aucun cours programmé pour cette sélection</p>
-          <p className="text-xs text-slate-500 max-w-md mx-auto">
-            {canManage
-              ? 'Utilisez le bouton "Ajouter un cours" pour organiser les créneaux hebdomadaires sans conflits d’horaires.'
-              : 'Aucun cours n’a été publié pour cette classe ou cet enseignant pour le moment.'}
-          </p>
-          {canManage && (
-            <button
-              onClick={handleOpenCreateModal}
-              className="mt-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold inline-flex items-center space-x-1.5"
-            >
-              <Plus className="w-3.5 h-3.5" />
-              <span>Programmer le premier cours</span>
-            </button>
-          )}
-        </div>
-      ) : viewMode === 'WEEKLY' ? (
-        /* VUE HEBDOMADAIRE (GRILLE) */
-        <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-sm">
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-6 divide-y lg:divide-y-0 lg:divide-x divide-slate-800">
+
+        {loading ? (
+          <div className="p-12 text-center text-slate-400">
+            <div className="w-8 h-8 border-2 border-cyan-500 border-t-transparent rounded-full animate-spin mx-auto mb-3" />
+            <p className="text-xs font-semibold">Chargement de l'emploi du temps...</p>
+          </div>
+        ) : filteredSchedules.length === 0 ? (
+          <div className="p-12 bg-slate-900 border border-slate-800 rounded-2xl text-center text-slate-400 space-y-3">
+            <CalendarDays className="w-12 h-12 mx-auto text-slate-600" />
+            <p className="text-sm font-semibold text-slate-300">Aucun cours programmé pour cette sélection</p>
+            <p className="text-xs text-slate-500 max-w-md mx-auto">
+              {canManage
+                ? 'Utilisez le bouton "Ajouter un cours" pour organiser les créneaux hebdomadaires sans conflits d’horaires.'
+                : 'Aucun cours n’a été publié pour le moment.'}
+            </p>
+            {canManage && (
+              <button
+                onClick={handleOpenCreateModal}
+                className="mt-2 px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold inline-flex items-center space-x-1.5"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>Programmer le premier cours</span>
+              </button>
+            )}
+          </div>
+        ) : isEnseignant ? (
+          /* ========================================================================= */
+          /* ÉCRAN ENSEIGNANT - TROIS MODES D'AFFICHAGE FILTRÉS (PAR JOUR, PAR CLASSE, GRILLE) */
+          /* ========================================================================= */
+          teacherDisplayMode === 'BY_DAY' ? (
+            /* MODE 1: PAR JOUR (LUNDI À SAMEDI) */
+            <div className="space-y-4">
+              {DAYS_OF_WEEK.map((day) => {
+                const daySchedules = filteredSchedules
+                  .filter((s) => Number(s.day_of_week) === day.id)
+                  .sort((a, b) => a.start_time.localeCompare(b.start_time));
+
+                return (
+                  <div key={day.id} className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden p-4 space-y-3">
+                    <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+                      <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                        <Calendar className="w-4 h-4 text-cyan-400" />
+                        <span>{day.name}</span>
+                      </h3>
+                      <span className="text-xs font-semibold px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-mono">
+                        {daySchedules.length} cours
+                      </span>
+                    </div>
+
+                    {daySchedules.length === 0 ? (
+                      <p className="text-xs text-slate-500 italic p-3 text-center bg-slate-950/40 rounded-xl">
+                        Pas de cours
+                      </p>
+                    ) : (
+                      <div className="space-y-2">
+                        {daySchedules.map((sch, idx) => (
+                          <div
+                            key={sch.id ? `${sch.id}-${idx}` : `sch-${idx}`}
+                            className="p-3 bg-slate-950 border border-slate-800/80 rounded-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 text-xs"
+                          >
+                            <div className="flex items-center space-x-3">
+                              <span className="font-mono font-bold text-cyan-300 bg-slate-900 px-2.5 py-1 rounded-lg border border-slate-800 shrink-0">
+                                {sch.start_time} - {sch.end_time}
+                              </span>
+                              <div>
+                                <div className="font-bold text-white text-sm">{sch.subject_name || 'Matière'}</div>
+                                <div className="text-slate-400 text-xs">
+                                  Classe : <span className="text-slate-200 font-semibold">{sch.class_name || 'Classe'}</span>
+                                </div>
+                              </div>
+                            </div>
+                            <div className="text-right self-end sm:self-center">
+                              <span className="text-slate-300 bg-slate-800 px-2.5 py-1 rounded-lg border border-slate-700 text-xs font-semibold flex items-center gap-1">
+                                <MapPin className="w-3 h-3 text-slate-400" />
+                                {sch.room ? `Salle ${sch.room}` : 'Salle principale'}
+                              </span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          ) : teacherDisplayMode === 'BY_CLASS' ? (
+            /* MODE 2: PAR CLASSE */
+            <div className="space-y-4">
+              {(() => {
+                const classMap = new Map<string, { className: string; slots: CourseSchedule[] }>();
+                filteredSchedules.forEach((s) => {
+                  const key = s.class_id || s.class_name || 'Autre';
+                  if (!classMap.has(key)) {
+                    classMap.set(key, { className: s.class_name || 'Classe', slots: [] });
+                  }
+                  classMap.get(key)!.slots.push(s);
+                });
+
+                const classEntries = Array.from(classMap.values());
+                const dayNamesMap: Record<number, string> = {
+                  1: 'Lundi', 2: 'Mardi', 3: 'Mercredi', 4: 'Jeudi', 5: 'Vendredi', 6: 'Samedi'
+                };
+
+                return classEntries.map((c, idx) => {
+                  const sortedSlots = c.slots.sort((a, b) => {
+                    const dDiff = (Number(a.day_of_week) || 0) - (Number(b.day_of_week) || 0);
+                    if (dDiff !== 0) return dDiff;
+                    return a.start_time.localeCompare(b.start_time);
+                  });
+
+                  return (
+                    <div key={idx} className="bg-slate-900 border border-slate-800 rounded-2xl p-4 space-y-3">
+                      <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+                        <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                          <BookOpen className="w-4 h-4 text-indigo-400" />
+                          <span>Classe : {c.className}</span>
+                        </h3>
+                        <span className="text-xs font-semibold px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-mono">
+                          {sortedSlots.length} cours / semaine
+                        </span>
+                      </div>
+
+                      <div className="space-y-2">
+                        {sortedSlots.map((sch, idx) => (
+                          <div
+                            key={sch.id ? `${sch.id}-${idx}` : `sorted-${idx}`}
+                            className="p-3 bg-slate-950 border border-slate-800/80 rounded-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 text-xs"
+                          >
+                            <div className="flex items-center space-x-3">
+                              <span className="font-semibold text-indigo-300 bg-slate-900 px-2.5 py-1 rounded-lg border border-slate-800 shrink-0">
+                                {dayNamesMap[sch.day_of_week] || 'Jour'}
+                              </span>
+                              <span className="font-mono font-bold text-cyan-300 bg-slate-900 px-2.5 py-1 rounded-lg border border-slate-800 shrink-0">
+                                {sch.start_time} - {sch.end_time}
+                              </span>
+                              <div>
+                                <div className="font-bold text-white text-sm">{sch.subject_name || 'Matière'}</div>
+                              </div>
+                            </div>
+                            <div className="text-right self-end sm:self-center">
+                              <span className="text-slate-300 bg-slate-800 px-2.5 py-1 rounded-lg border border-slate-700 text-xs font-semibold flex items-center gap-1">
+                                <MapPin className="w-3 h-3 text-slate-400" />
+                                {sch.room ? `Salle ${sch.room}` : 'Salle principale'}
+                              </span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                });
+              })()}
+            </div>
+          ) : (
+            /* MODE 3: GRILLE DE LA SEMAINE */
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-sm">
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-6 divide-y lg:divide-y-0 lg:divide-x divide-slate-800">
+                {DAYS_OF_WEEK.map((day) => {
+                  const daySchedules = filteredSchedules
+                    .filter((s) => Number(s.day_of_week) === day.id)
+                    .sort((a, b) => a.start_time.localeCompare(b.start_time));
+
+                  const isToday = new Date().getDay() === day.id;
+
+                  return (
+                    <div key={day.id} className="flex flex-col min-h-[350px]">
+                      <div
+                        className={`p-3 border-b border-slate-800 flex items-center justify-between ${
+                          isToday ? 'bg-cyan-950/30 text-cyan-300 font-bold' : 'bg-slate-800/40 text-slate-300'
+                        }`}
+                      >
+                        <div className="flex items-center space-x-1.5">
+                          <span className="text-xs font-bold">{day.name}</span>
+                          {isToday && (
+                            <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" title="Aujourd'hui" />
+                          )}
+                        </div>
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 font-mono">
+                          {daySchedules.length}
+                        </span>
+                      </div>
+
+                      <div className="p-2 space-y-2 flex-1 bg-slate-900/60">
+                        {daySchedules.length === 0 ? (
+                          <div className="h-full flex items-center justify-center p-4 text-center">
+                            <span className="text-[11px] text-slate-600 italic">Pas de cours</span>
+                          </div>
+                        ) : (
+                          daySchedules.map((sch, idx) => (
+                            <div
+                              key={sch.id ? `${sch.id}-${idx}` : `grid-${idx}`}
+                              className="p-2.5 rounded-xl border bg-slate-800/80 text-slate-200 border-slate-700/80 text-xs"
+                            >
+                              <div className="font-mono text-[11px] font-bold text-cyan-400 mb-1">
+                                {sch.start_time} - {sch.end_time}
+                              </div>
+                              <div className="font-bold text-white text-xs truncate" title={sch.subject_name}>
+                                {sch.subject_name}
+                              </div>
+                              <div className="flex items-center justify-between text-[11px] text-slate-400 mt-1">
+                                <span className="font-semibold text-slate-300 truncate" title={sch.class_name}>
+                                  {sch.class_name}
+                                </span>
+                                {sch.room && (
+                                  <span className="flex items-center gap-0.5 text-slate-400 shrink-0 ml-1">
+                                    <MapPin className="w-2.5 h-2.5" />
+                                    {sch.room}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )
+        ) : viewMode === 'WEEKLY' ? (
+          /* VUE HEBDOMADAIRE CLASSIQUE (DIRECTION / PARENTS / ELEVES) */
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-sm">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-6 divide-y lg:divide-y-0 lg:divide-x divide-slate-800">
             {DAYS_OF_WEEK.map((day) => {
               const daySchedules = filteredSchedules
                 .filter((s) => s.day_of_week === day.id)
@@ -735,13 +1192,13 @@ export const TimetableView: React.FC = () => {
                         <span className="text-[11px] text-slate-600 italic">Pas de cours</span>
                       </div>
                     ) : (
-                      daySchedules.map((sch) => {
+                      daySchedules.map((sch, idx) => {
                         const liveInfo = getCourseLiveStatus(sch);
                         const isDraft = sch.is_published === 0;
 
                         return (
                           <div
-                            key={sch.id}
+                            key={sch.id ? `${sch.id}-${idx}` : `admin-grid-${idx}`}
                             className={`p-2.5 rounded-xl border transition-all text-xs relative group ${
                               liveInfo.status === 'EN_COURS'
                                 ? 'bg-emerald-950/40 border-emerald-500/50 shadow-md shadow-emerald-900/20 ring-1 ring-emerald-500/30'
@@ -796,7 +1253,7 @@ export const TimetableView: React.FC = () => {
 
                             {/* Manager Actions */}
                             {canManage && (
-                              <div className="mt-2 pt-1.5 border-t border-slate-700/50 flex items-center justify-end space-x-1">
+                              <div className="mt-2 pt-1.5 border-t border-slate-700/50 flex items-center justify-end space-x-1 no-print">
                                 <button
                                   onClick={() => handleOpenEditModal(sch)}
                                   className="p-1 rounded hover:bg-slate-700 text-slate-400 hover:text-cyan-300 transition"
@@ -823,120 +1280,108 @@ export const TimetableView: React.FC = () => {
             })}
           </div>
         </div>
-      ) : (
-        /* VUE JOURNALIÈRE (AGENDA CHRONOLOGIQUE) */
-        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4">
-          <div className="flex items-center justify-between pb-3 border-b border-slate-800">
-            <h2 className="text-sm font-bold text-white flex items-center gap-2">
-              <Calendar className="w-4 h-4 text-cyan-400" />
-              Programme détaillé du {DAYS_OF_WEEK.find((d) => d.id === selectedDay)?.name} ({filteredSchedules.length} séance{filteredSchedules.length > 1 ? 's' : ''})
-            </h2>
-            {canManage && (
-              <button
-                onClick={handleOpenCreateModal}
-                className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold inline-flex items-center space-x-1"
-              >
-                <Plus className="w-3.5 h-3.5" />
-                <span>Ajouter ce jour</span>
-              </button>
-            )}
-          </div>
+        ) : (
+          /* VUE JOURNALIÈRE CLASSIQUE (AGENDA CHRONOLOGIQUE) */
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+              <h2 className="text-sm font-bold text-white flex items-center gap-2">
+                <Calendar className="w-4 h-4 text-cyan-400" />
+                Programme détaillé du {DAYS_OF_WEEK.find((d) => d.id === selectedDay)?.name} ({filteredSchedules.length} séance{filteredSchedules.length > 1 ? 's' : ''})
+              </h2>
+              {canManage && (
+                <button
+                  onClick={handleOpenCreateModal}
+                  className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold inline-flex items-center space-x-1 no-print"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>Ajouter ce jour</span>
+                </button>
+              )}
+            </div>
 
-          <div className="space-y-3">
-            {filteredSchedules.length === 0 ? (
-              <div className="p-8 text-center text-slate-500 text-xs">
-                Aucun cours prévu pour ce jour.
-              </div>
-            ) : (
-              filteredSchedules
-                .sort((a, b) => a.start_time.localeCompare(b.start_time))
-                .map((sch) => {
-                  const liveInfo = getCourseLiveStatus(sch);
-                  const isDraft = sch.is_published === 0;
+            <div className="space-y-3">
+              {filteredSchedules.length === 0 ? (
+                <div className="p-8 text-center text-slate-500 text-xs">
+                  Aucun cours prévu pour ce jour.
+                </div>
+              ) : (
+                filteredSchedules
+                  .sort((a, b) => a.start_time.localeCompare(b.start_time))
+                  .map((sch, idx) => {
+                    const liveInfo = getCourseLiveStatus(sch);
+                    const isDraft = sch.is_published === 0;
 
-                  return (
-                    <div
-                      key={sch.id}
-                      className={`p-4 rounded-xl border flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 transition ${
-                        liveInfo.status === 'EN_COURS'
-                          ? 'bg-emerald-950/30 border-emerald-500/40 shadow-sm shadow-emerald-900/30'
-                          : 'bg-slate-800/60 border-slate-700/60'
-                      }`}
-                    >
-                      <div className="flex items-start space-x-3.5">
-                        <div className="p-2.5 rounded-xl bg-slate-800 border border-slate-700 text-center shrink-0">
-                          <Clock className="w-4 h-4 mx-auto text-cyan-400 mb-0.5" />
-                          <div className="font-mono text-xs font-bold text-white whitespace-nowrap">
-                            {sch.start_time}
+                    return (
+                      <div
+                        key={sch.id ? `${sch.id}-${idx}` : `filtered-${idx}`}
+                        className={`p-4 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs ${
+                          liveInfo.status === 'EN_COURS'
+                            ? 'bg-emerald-950/40 border-emerald-500/50 shadow-md ring-1 ring-emerald-500/30'
+                            : isDraft
+                            ? 'bg-amber-950/20 border-amber-600/30 text-amber-100'
+                            : 'bg-slate-950 border-slate-800 text-slate-200'
+                        }`}
+                      >
+                        <div className="flex items-center space-x-3">
+                          <div className="text-center font-mono p-2 rounded-lg bg-slate-900 border border-slate-800 shrink-0">
+                            <span className="block font-bold text-cyan-400">{sch.start_time}</span>
+                            <span className="text-[10px] text-slate-500">à {sch.end_time}</span>
                           </div>
-                          <div className="font-mono text-[10px] text-slate-400 whitespace-nowrap">
-                            {sch.end_time}
+                          <div>
+                            <div className="font-bold text-sm text-white">{sch.subject_name}</div>
+                            <div className="text-slate-400 text-xs mt-0.5 flex items-center space-x-2">
+                              <span>Classe : <strong className="text-slate-200">{sch.class_name}</strong></span>
+                              <span>•</span>
+                              <span>Enseignant : <strong className="text-slate-300">{sch.teacher_name || sch.teacher_username}</strong></span>
+                            </div>
                           </div>
                         </div>
 
-                        <div>
-                          <div className="flex items-center space-x-2">
-                            <h3 className="font-bold text-white text-sm">{sch.subject_name}</h3>
-                            {isDraft && (
-                              <span className="text-[9px] px-2 py-0.5 rounded-full font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30">
-                                Brouillon
-                              </span>
-                            )}
-                            {(isSurveillant || canManage) && (
-                              <span className={`text-[10px] px-2 py-0.5 rounded-full font-semibold border ${liveInfo.color}`}>
-                                {liveInfo.label}
-                              </span>
-                            )}
-                          </div>
+                        <div className="flex items-center space-x-3 self-end sm:self-center">
+                          {sch.room && (
+                            <span className="px-2.5 py-1 rounded-lg bg-slate-900 border border-slate-800 text-slate-300 font-semibold text-[11px] flex items-center gap-1">
+                              <MapPin className="w-3 h-3 text-slate-400" />
+                              Salle {sch.room}
+                            </span>
+                          )}
 
-                          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-300 mt-1.5">
-                            <span className="flex items-center gap-1 font-semibold text-indigo-300">
-                              <School className="w-3.5 h-3.5 text-indigo-400" />
-                              Classe : {sch.class_name} ({sch.cycle_code})
-                            </span>
-                            <span className="flex items-center gap-1 text-slate-300">
-                              <UserCheck className="w-3.5 h-3.5 text-slate-400" />
-                              Enseignant : {sch.teacher_name || sch.teacher_username}
-                            </span>
-                            {sch.room && (
-                              <span className="flex items-center gap-1 text-slate-400">
-                                <MapPin className="w-3.5 h-3.5 text-slate-500" />
-                                Salle : {sch.room}
-                              </span>
-                            )}
-                          </div>
+                          {canManage && (
+                            <div className="flex items-center space-x-2 shrink-0 no-print">
+                              <button
+                                onClick={() => handleOpenEditModal(sch)}
+                                className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition"
+                                title="Modifier ce créneau"
+                              >
+                                <Edit2 className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                onClick={() => handleDeleteSlot(sch.id, `${sch.subject_name} (${sch.class_name})`)}
+                                className="p-2 rounded-lg bg-slate-800 hover:bg-rose-900/40 text-slate-300 hover:text-rose-400 border border-slate-700 transition"
+                                title="Supprimer ce créneau"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          )}
                         </div>
                       </div>
-
-                      {canManage && (
-                        <div className="flex items-center space-x-2 shrink-0 self-end sm:self-center">
-                          <button
-                            onClick={() => handleOpenEditModal(sch)}
-                            className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700 transition"
-                            title="Modifier ce créneau"
-                          >
-                            <Edit2 className="w-3.5 h-3.5" />
-                          </button>
-                          <button
-                            onClick={() => handleDeleteSlot(sch.id, `${sch.subject_name} (${sch.class_name})`)}
-                            className="p-2 rounded-lg bg-slate-800 hover:bg-rose-900/40 text-slate-300 hover:text-rose-400 border border-slate-700 transition"
-                            title="Supprimer ce créneau"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  );
-                })
-            )}
+                    );
+                  })
+              )}
+            </div>
           </div>
+        )}
+
+        {/* TIMESTAMP ÉDITION BAS DE DOCUMENT (VISIBLE À L'IMPRESSION) */}
+        <div className="pt-3 border-t border-slate-800 text-[10px] text-slate-400 flex items-center justify-between">
+          <span>Édité le {new Date().toLocaleDateString('fr-FR')} à {new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' })} (Heure Congo-Brazzaville)</span>
+          <span>{establishment?.name || 'Eco GES'} • Document certifié</span>
         </div>
-      )}
+      </div>
 
       {/* CREATE & EDIT MODAL (DG & DE ONLY) */}
       {showModal && (
-        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
+        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto no-print">
           <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-lg w-full p-6 space-y-5 shadow-2xl relative">
             <div className="flex items-center justify-between pb-3 border-b border-slate-800">
               <div className="flex items-center space-x-2">
@@ -945,15 +1390,12 @@ export const TimetableView: React.FC = () => {
                 </div>
                 <div>
                   <h3 className="text-base font-bold text-white">
-                    {editingSchedule ? 'Modifier le créneau horaire' : 'Programmer un nouveau cours'}
+                    {editingSchedule ? 'Modifier le créneau' : 'Programmer un nouveau cours'}
                   </h3>
-                  <p className="text-xs text-slate-400">Contrôle strict des conflits enseignant, classe et salle</p>
+                  <p className="text-xs text-slate-400">Emploi du temps officiel de l'établissement</p>
                 </div>
               </div>
-              <button
-                onClick={() => setShowModal(false)}
-                className="text-slate-400 hover:text-white p-1 rounded-lg"
-              >
+              <button onClick={() => setShowModal(false)} className="text-slate-400 hover:text-white p-1">
                 <X className="w-5 h-5" />
               </button>
             </div>
@@ -962,7 +1404,7 @@ export const TimetableView: React.FC = () => {
               {/* Classe */}
               <div>
                 <label className="block text-slate-300 font-semibold mb-1">
-                  Classe ciblée <span className="text-rose-400">*</span>
+                  Classe <span className="text-rose-400">*</span>
                 </label>
                 <select
                   value={formClassId}
@@ -970,10 +1412,10 @@ export const TimetableView: React.FC = () => {
                   className="w-full bg-slate-800 border border-slate-700 text-white rounded-xl px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   required
                 >
-                  <option value="">-- Choisir une classe --</option>
+                  <option value="">-- Sélectionner une classe --</option>
                   {classes.map((cls) => (
                     <option key={cls.id} value={cls.id}>
-                      {cls.name} ({cls.cycle_code}{cls.serie_code ? ` - Série ${cls.serie_code}` : ''})
+                      {cls.name} ({cls.cycle_code})
                     </option>
                   ))}
                 </select>
@@ -990,10 +1432,10 @@ export const TimetableView: React.FC = () => {
                   className="w-full bg-slate-800 border border-slate-700 text-white rounded-xl px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   required
                 >
-                  <option value="">-- Choisir une matière --</option>
+                  <option value="">-- Sélectionner une matière --</option>
                   {subjects.map((sub) => (
                     <option key={sub.id} value={sub.id}>
-                      {sub.name} ({sub.code} — {sub.cycle_code})
+                      {sub.name} ({sub.code})
                     </option>
                   ))}
                 </select>
@@ -1002,7 +1444,7 @@ export const TimetableView: React.FC = () => {
               {/* Enseignant */}
               <div>
                 <label className="block text-slate-300 font-semibold mb-1">
-                  Enseignant assigné <span className="text-rose-400">*</span>
+                  Enseignant Titulaire <span className="text-rose-400">*</span>
                 </label>
                 <select
                   value={formTeacherId}
@@ -1010,16 +1452,16 @@ export const TimetableView: React.FC = () => {
                   className="w-full bg-slate-800 border border-slate-700 text-white rounded-xl px-3 py-2 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500"
                   required
                 >
-                  <option value="">-- Choisir un enseignant --</option>
-                  {teachers.map((tch) => (
-                    <option key={tch.id} value={tch.id}>
-                      {tch.full_name} ({tch.username})
+                  <option value="">-- Sélectionner l'enseignant --</option>
+                  {teachers.map((t) => (
+                    <option key={t.id} value={t.id}>
+                      {t.full_name} ({t.username})
                     </option>
                   ))}
                 </select>
               </div>
 
-              {/* Jour et Salle */}
+              {/* Jour de la semaine & Salle */}
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className="block text-slate-300 font-semibold mb-1">
@@ -1120,7 +1562,7 @@ export const TimetableView: React.FC = () => {
 
       {/* AUDIT LOG MODAL */}
       {showAuditModal && (
-        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-xs flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-xs flex items-center justify-center p-4 no-print">
           <div className="bg-slate-900 border border-slate-800 rounded-2xl max-w-2xl w-full p-6 space-y-4 shadow-2xl max-h-[85vh] flex flex-col">
             <div className="flex items-center justify-between pb-3 border-b border-slate-800">
               <div className="flex items-center space-x-2">
