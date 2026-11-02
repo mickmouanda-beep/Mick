@@ -1,6 +1,6 @@
 {
-  "name": "FAITH SCHOOL MANAGER",
-  "description": "Système intégré de gestion scolaire pour établissements d'enseignement général et technique au Congo-Brazzaville.",
+  "name": "Eco GES",
+  "description": "Système intégré de gestion scolaire pour établissements d'enseignement général et technique (préscolaire, primaire, collège, lycée).",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

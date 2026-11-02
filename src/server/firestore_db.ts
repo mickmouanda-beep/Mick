@@ -12,7 +12,7 @@ if (process.env.FIREBASE_SERVICE_ACCOUNT) {
   }
 }
 
-export const firebaseProjectId = serviceAccount?.project_id || 'ecolef-7b853';
+export const firebaseProjectId = serviceAccount?.project_id || 'soy-spanner-zn2tx';
 
 const app = getApps().length > 0
   ? getApps()[0]

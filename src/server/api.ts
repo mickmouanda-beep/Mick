@@ -1647,6 +1647,7 @@ api.get('/document-templates/:docType', authenticateToken, async (req: Authentic
       'situation_financiere',
       'certificat_scolarite',
       'liste_presence',
+      'fiche_individuelle',
     ];
 
     if (!validDocTypes.includes(docType)) {
@@ -1685,6 +1686,20 @@ api.put('/document-templates/:docType', authenticateToken, async (req: Authentic
     const estId = req.user!.establishment_id;
     const docType = req.params.docType as DocumentType;
     const incomingConfig = req.body;
+
+    const validDocTypes: DocumentType[] = [
+      'bulletin',
+      'quittance',
+      'fiche_paie',
+      'situation_financiere',
+      'certificat_scolarite',
+      'liste_presence',
+      'fiche_individuelle',
+    ];
+
+    if (!validDocTypes.includes(docType)) {
+      return res.status(400).json({ error: `Type de document "${docType}" non pris en charge.` });
+    }
 
     if (!incomingConfig || !incomingConfig.modelId) {
       return res.status(400).json({ error: 'Données de configuration du modèle incomplètes.' });
@@ -11266,13 +11281,222 @@ api.post('/discipline/:id/acknowledge', authenticateToken, async (req: Authentic
     };
 
     await setDocData(`establishments/${estId}/disciplinary_incidents`, req.params.id, updated);
-    await setDocData('disciplinary_incidents', req.params.id, updated);
-
     logAudit(estId, req.user!.id, req.user!.full_name, 'ACCUSE_RECEPTION_DISCIPLINE_PARENT', 'DISCIPLINE', req.params.id);
 
     res.json({ message: 'Accusé de réception enregistré avec succès.' });
   } catch (error: any) {
     res.status(500).json({ error: 'Erreur lors de l accusé de réception.' });
+  }
+});
+
+api.post('/establishment/purge-demo-data/preview', authenticateToken, requireRole(['PROMOTEUR', 'ADMIN_GENERAL']), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const estId = req.user!.establishment_id;
+    const est: any = await getEstablishment(estId);
+
+    if (!est) {
+      return res.status(404).json({ error: 'Établissement introuvable.' });
+    }
+
+    const collectionsToScan = [
+      { key: 'students', label: 'Élèves inscrites / de test' },
+      { key: 'payments', label: 'Quittances & Paiements de test' },
+      { key: 'grades', label: 'Notes de test' },
+      { key: 'evaluations', label: 'Évaluations de test' },
+      { key: 'student_attendances', label: 'Registres de présence' },
+      { key: 'student_course_attendances', label: 'Appels par cours' },
+      { key: 'payroll_records', label: 'Fiches de paie' },
+      { key: 'disciplinary_incidents', label: 'Incidents de discipline' },
+      { key: 'guardians', label: 'Comptes Tuteurs / Parents' },
+    ];
+
+    let totalDemoCount = 0;
+    const details: any[] = [];
+
+    for (const col of collectionsToScan) {
+      const docs = await listSubcollectionDocs<any>(estId, col.key);
+      const count = (docs || []).length;
+      totalDemoCount += count;
+      details.push({
+        collection: col.key,
+        label: col.label,
+        count,
+        sampleNames: (docs || []).slice(0, 3).map((d: any) => d.first_name ? `${d.last_name} ${d.first_name}` : d.name || d.id),
+      });
+    }
+
+    res.json({
+      establishmentName: est.name,
+      isProduction: Boolean(est.is_production),
+      totalDemoCount,
+      details,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: 'Erreur lors du calcul de prévisibilisation de la purge.' });
+  }
+});
+
+api.post('/establishment/purge-demo-data', authenticateToken, requireRole(['PROMOTEUR', 'ADMIN_GENERAL']), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const estId = req.user!.establishment_id;
+    const est: any = await getEstablishment(estId);
+
+    if (!est) {
+      return res.status(404).json({ error: 'Établissement introuvable.' });
+    }
+
+    if (est.is_production === true || est.status === 'PRODUCTION') {
+      return res.status(403).json({ error: 'La purge des données est définitivement désactivée sur cet établissement en mode production.' });
+    }
+
+    const { confirmEstablishmentName } = req.body;
+    if (!confirmEstablishmentName || confirmEstablishmentName.trim().toLowerCase() !== (est.name || '').trim().toLowerCase()) {
+      return res.status(400).json({ error: `Pour confirmer la purge, veuillez saisir exactement le nom de votre établissement ("${est.name}").` });
+    }
+
+    const collectionsToBackup = [
+      'students', 'payments', 'grades', 'evaluations', 'student_attendances',
+      'student_course_attendances', 'payroll_records', 'disciplinary_incidents',
+      'complaints', 'lesson_logs', 'guardians'
+    ];
+
+    // 1. Sauvegarde automatique de sécurité avant la purge
+    const backupId = `BAK-AUTO-PURGE-${Date.now()}`;
+    const backupData: Record<string, any[]> = {};
+
+    for (const subcol of collectionsToBackup) {
+      const docs = await listSubcollectionDocs<any>(estId, subcol);
+      backupData[subcol] = docs || [];
+    }
+
+    await setDocData(`establishments/${estId}/backups`, backupId, {
+      id: backupId,
+      establishment_id: estId,
+      created_at: new Date().toISOString(),
+      created_by: req.user!.full_name,
+      reason: 'Sauvegarde automatique pré-purge',
+      data_snapshot: JSON.stringify(backupData),
+    });
+
+    // 2. Supprimer les données de démonstration / de test
+    let deletedCount = 0;
+    for (const subcol of collectionsToBackup) {
+      const docs = await listSubcollectionDocs<any>(estId, subcol);
+      for (const d of (docs || [])) {
+        if (d && d.id) {
+          await deleteDocData(`establishments/${estId}/${subcol}`, d.id);
+          await deleteDocData(subcol, d.id);
+          deletedCount++;
+        }
+      }
+    }
+
+    // 3. Basculer l'établissement en mode production pour verrouiller la purge définitivement
+    await setDocData('establishments', estId, {
+      ...est,
+      is_production: true,
+      production_activated_at: new Date().toISOString(),
+    });
+
+    logAudit(estId, req.user!.id, req.user!.full_name, 'PURGE_DONNEES_DEMO', 'ESTABLISHMENT', estId, {
+      backupId,
+      deletedRecords: deletedCount,
+    });
+
+    res.json({
+      message: `Purge de démonstration effectuée avec succès (${deletedCount} enregistrements supprimés). Sauvegarde préalable créée (${backupId}). L'établissement est maintenant verrouillé en mode Production.`,
+      backupId,
+      deletedCount,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error?.message || 'Erreur lors de la purge des données de test.' });
+  }
+});
+
+// Endpoints Sauvegardes & Restauration Sans Terminal
+api.get('/establishment/backups', authenticateToken, requireRole(['PROMOTEUR', 'ADMIN_GENERAL']), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const estId = req.user!.establishment_id;
+    const rawBackups = await listSubcollectionDocs<any>(estId, 'backups');
+    const backups = (rawBackups || []).map((b: any) => ({
+      id: b.id,
+      created_at: b.created_at,
+      created_by: b.created_by,
+      reason: b.reason,
+    }));
+    backups.sort((a, b) => (b.created_at || '').localeCompare(a.created_at || ''));
+    res.json(backups);
+  } catch (error: any) {
+    res.status(500).json({ error: 'Erreur lors du chargement des sauvegardes.' });
+  }
+});
+
+api.post('/establishment/backups/create', authenticateToken, requireRole(['PROMOTEUR', 'ADMIN_GENERAL']), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const estId = req.user!.establishment_id;
+    const { reason } = req.body;
+
+    const collectionsToBackup = [
+      'students', 'classes', 'subjects', 'class_subjects', 'payments', 'grades',
+      'evaluations', 'student_attendances', 'student_course_attendances',
+      'payroll_records', 'disciplinary_incidents', 'complaints', 'lesson_logs', 'guardians'
+    ];
+
+    const backupId = `BAK-MANUAL-${Date.now()}`;
+    const backupData: Record<string, any[]> = {};
+
+    for (const subcol of collectionsToBackup) {
+      const docs = await listSubcollectionDocs<any>(estId, subcol);
+      backupData[subcol] = docs || [];
+    }
+
+    await setDocData(`establishments/${estId}/backups`, backupId, {
+      id: backupId,
+      establishment_id: estId,
+      created_at: new Date().toISOString(),
+      created_by: req.user!.full_name,
+      reason: reason || 'Sauvegarde manuelle demandée par le Promoteur',
+      data_snapshot: JSON.stringify(backupData),
+    });
+
+    logAudit(estId, req.user!.id, req.user!.full_name, 'CREATION_SAUVEGARDE', 'BACKUP', backupId);
+    res.json({ message: 'Sauvegarde créée avec succès.', backupId });
+  } catch (error: any) {
+    res.status(500).json({ error: 'Erreur lors de la création de la sauvegarde.' });
+  }
+});
+
+api.post('/establishment/backups/restore', authenticateToken, requireRole(['PROMOTEUR', 'ADMIN_GENERAL']), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const estId = req.user!.establishment_id;
+    const { backupId } = req.body;
+
+    if (!backupId) return res.status(400).json({ error: 'Identifiant de sauvegarde requis.' });
+
+    const backupDoc = await getSubcollectionDoc<any>(estId, 'backups', backupId);
+    if (!backupDoc || !backupDoc.data_snapshot) {
+      return res.status(404).json({ error: 'Sauvegarde introuvable ou invalide.' });
+    }
+
+    const snapshot = JSON.parse(backupDoc.data_snapshot);
+    let restoredCount = 0;
+
+    for (const [subcolName, docs] of Object.entries(snapshot)) {
+      if (Array.isArray(docs)) {
+        for (const item of docs) {
+          if (item && item.id) {
+            await setDocData(`establishments/${estId}/${subcolName}`, item.id, item);
+            await setDocData(subcolName, item.id, item);
+            restoredCount++;
+          }
+        }
+      }
+    }
+
+    logAudit(estId, req.user!.id, req.user!.full_name, 'RESTAURATION_SAUVEGARDE', 'BACKUP', backupId, { restoredCount });
+    res.json({ message: `Restauration effectuée avec succès (${restoredCount} enregistrements restaurés).`, restoredCount });
+  } catch (error: any) {
+    res.status(500).json({ error: 'Erreur lors de la restauration de la sauvegarde.' });
   }
 });
 

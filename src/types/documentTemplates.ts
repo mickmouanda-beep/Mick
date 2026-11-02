@@ -4,7 +4,8 @@ export type DocumentType =
   | 'fiche_paie'
   | 'situation_financiere'
   | 'certificat_scolarite'
-  | 'liste_presence';
+  | 'liste_presence'
+  | 'fiche_individuelle';
 
 export type DocumentModelId =
   | 'classique'
@@ -164,6 +165,11 @@ export const DOCUMENT_TYPE_LABELS: Record<DocumentType, { label: string; descrip
     description: 'Feuille d’émargement journalière ou mensuelle de la classe pour le contrôle d’assiduité.',
     available: true,
   },
+  fiche_individuelle: {
+    label: 'Fiche individuelle (Dossier élève)',
+    description: 'Fiche d’identification complète de l’élève avec photo, état civil, scolarité et tuteurs.',
+    available: true,
+  },
 };
 
 export function getDefaultTemplateConfig(
@@ -227,6 +233,12 @@ export function getDefaultTemplateConfig(
       signatoryName = "Surveillance Générale";
       headerText = "RÉPUBLIQUE DU CONGO • REGISTRE D'ÉMARGEMENT ET D'ASSIDUITÉ SCOLAIRE";
       footerText = "Feuille de présence officielle • Registre journalier de surveillance.";
+      break;
+    case 'fiche_individuelle':
+      signatoryTitle = "Le Directeur Général / Chef d'Établissement";
+      signatoryName = "Secrétariat Général";
+      headerText = "RÉPUBLIQUE DU CONGO • FICHE INDIVIDUELLE D'INSCRIPTION ET DOSSIER SCOLAIRE";
+      footerText = "Document confidentiel d'identification et de suivi administratif de l'élève.";
       break;
   }
 

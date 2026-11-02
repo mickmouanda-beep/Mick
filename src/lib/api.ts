@@ -139,6 +139,13 @@ export const api = {
     request<any>(`/document-templates/${docType}`, { method: 'PUT', body: JSON.stringify(config) }),
   getAuditLogs: () => request<any[]>('/audit-logs'),
 
+  // Purge & Sauvegardes
+  previewPurgeDemoData: () => request<any>('/establishment/purge-demo-data/preview', { method: 'POST' }),
+  purgeDemoData: (confirmEstablishmentName: string) => request<any>('/establishment/purge-demo-data', { method: 'POST', body: JSON.stringify({ confirmEstablishmentName }) }),
+  getBackups: () => request<any[]>('/establishment/backups'),
+  createBackup: (reason?: string) => request<any>('/establishment/backups/create', { method: 'POST', body: JSON.stringify({ reason }) }),
+  restoreBackup: (backupId: string) => request<any>('/establishment/backups/restore', { method: 'POST', body: JSON.stringify({ backupId }) }),
+
   // Utilisateurs
   getUsers: () => request<any[]>('/users'),
   createUser: (payload: any) => request<any>('/users', { method: 'POST', body: JSON.stringify(payload) }),

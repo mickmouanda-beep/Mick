@@ -1,41 +1,9 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // 1. Diagnostic and test collection for ping verification
-    match /_tests/{docId} {
-      allow read, write: if true;
-    }
-
-    // 2. Global platform collections
-    match /users/{userId} {
-      allow read, write: if true;
-    }
-    match /creation_authorizations/{authId} {
-      allow read, write: if true;
-    }
-    match /commercial_formulas/{formulaId} {
-      allow read, write: if true;
-    }
-    match /subscriptions/{subId} {
-      allow read, write: if true;
-    }
-    match /license_renewals/{renId} {
-      allow read, write: if true;
-    }
-    match /pedagogical_references/{refId} {
-      allow read, write: if true;
-    }
-
-    // 3. Establishments and all tenant subcollections (students, teachers, payments, grades, attendances, payroll, etc.)
-    match /establishments/{establishmentId} {
-      allow read, write: if true;
-
-      match /{allSubcollections=**} {
-        allow read, write: if true;
-      }
-    }
-
-    // 4. Default deny catch-all
+    // Verrouillage strict de Firestore côté client :
+    // L'application web communique exclusivement avec le serveur Node.js / Express (/api/*)
+    // utilisant le SDK Firebase Admin. Tout accès direct du client Web/navigateur est rejeté (403/Permission Denied).
     match /{document=**} {
       allow read, write: if false;
     }

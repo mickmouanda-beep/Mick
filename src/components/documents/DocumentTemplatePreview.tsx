@@ -6,6 +6,7 @@ import { CustomizablePayslip } from './CustomizablePayslip.tsx';
 import { CustomizableStatement } from './CustomizableStatement.tsx';
 import { CustomizableSchoolCertificate } from './CustomizableSchoolCertificate.tsx';
 import { CustomizableAttendanceSheet } from './CustomizableAttendanceSheet.tsx';
+import { CustomizableStudentFile } from './CustomizableStudentFile.tsx';
 import { Payment } from '../../types.ts';
 
 interface DocumentTemplatePreviewProps {
@@ -214,6 +215,30 @@ export const DocumentTemplatePreview: React.FC<DocumentTemplatePreviewProps> = (
     { student_id: '5', matricule: 'MAT-2026-0070', name: 'NZILA Jean-Paul', status: 'PRESENT', arrival_time: '07h20', departure_time: '12h30', motif: '' },
   ];
 
+  // 7. Fiche individuelle élève
+  const sampleStudentDetail = {
+    id: 'STU-SAMPLE-01',
+    matricule: 'MAT-2026-0038',
+    first_name: 'Prince Albert',
+    last_name: 'MASSALA',
+    post_name: '',
+    gender: 'M' as const,
+    birth_date: '2009-05-14',
+    birth_place: 'Brazzaville (Poto-Poto)',
+    address: 'Arrondissement 3 Poto-Poto, Rue Mbochi, N° 142',
+    photo_data: null,
+    guardian_name: 'M. Albert MASSALA',
+    guardian_phone: '+242 06 654 32 10',
+    guardian_email: 'albert.massala@gmail.com',
+    guardian_relation: 'Père',
+    class_name: '3ème A',
+    level_code: '3ème',
+    cycle_code: 'COLLEGE',
+    status: 'INSCRIT',
+    student_notes: 'Élève assidu, aucune allergie connue.',
+    academic_year: '2026-2027',
+  };
+
   switch (docType) {
     case 'quittance':
       return (
@@ -263,6 +288,16 @@ export const DocumentTemplatePreview: React.FC<DocumentTemplatePreviewProps> = (
           sessionTitle="Appel Général - Surveillance"
           teacherName="M. MASSALA Albert"
           rows={sampleAttendanceRows}
+          establishment={establishment}
+          customConfig={config}
+        />
+      );
+
+    case 'fiche_individuelle':
+      return (
+        <CustomizableStudentFile
+          student={sampleStudentDetail}
+          academicYear="2026-2027"
           establishment={establishment}
           customConfig={config}
         />
