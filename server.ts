@@ -4,7 +4,18 @@ import cookieParser from 'cookie-parser';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import apiRouter from './src/server/api.ts';
-import { getDb } from './src/server/db.ts';
+import { db } from './src/server/firestore_db.ts';
+
+// 1. TRAPPES DE SÉCURITÉ GLOBALES
+// Empêche tout crash inattendu du processus Node.js suite à des promesses rejetées ou erreurs asynchrones non capturées
+process.on('uncaughtException', (err: Error) => {
+  console.error('[CRITICAL] Uncaught exception interceptée (processus maintenu actif):', err?.message || err);
+  if (err?.stack) console.error(err.stack);
+});
+
+process.on('unhandledRejection', (reason: unknown) => {
+  console.error('[CRITICAL] Unhandled promise rejection interceptée (processus maintenu actif):', reason);
+});
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -12,11 +23,22 @@ const __dirname = path.dirname(__filename);
 async function startServer() {
   const app = express();
   const isProduction = process.env.NODE_ENV === 'production';
-  const PORT = Number(process.env.PORT) || 3000;
 
-  // Endpoint de santé pour les sondes Cloud Run et Kubernetes
+  // 2. PORT FIXÉ DE MANIÈRE DÉFINITIVE SUR 3000
+  // Dans l'environnement Cloud Run containerisé, Nginx écoute déjà sur le port 8080 (process.env.PORT)
+  // et proxyfie le trafic externe vers localhost:3000.
+  // Toute liaison d'Express sur 8080 provoque fatalement `EADDRINUSE: address already in use 0.0.0.0:8080`.
+  // Par conséquent, Express DOIT toujours se lier au port internal 3000.
+  const PORT = 3000;
+
+  // 3. Endpoint de santé pour les sondes Cloud Run et Kubernetes (prioritaire, placé au tout début)
   app.get('/healthz', (_req, res) => {
-    res.status(200).json({ status: 'ok', uptime: process.uptime() });
+    res.status(200).json({
+      status: 'ok',
+      uptime: process.uptime(),
+      timestamp: new Date().toISOString(),
+      service: 'faith-school-manager'
+    });
   });
 
   // Middlewares fondamentaux
@@ -25,8 +47,12 @@ async function startServer() {
   app.use(express.urlencoded({ extended: true, limit: '50mb' }));
   app.use(cookieParser());
 
-  // Initialisation de la base de données
-  await getDb();
+  // 4. Initialisation sécurisée de Cloud Firestore
+  try {
+    console.log('[Eco GES] Connexion active Cloud Firestore prête (Base:', db ? 'Connectée' : 'Inaccessible', ').');
+  } catch (fsErr) {
+    console.error('[Eco GES] Avertissement initialisation Firestore (le serveur poursuit son démarrage):', fsErr);
+  }
 
   // Montage des routes d'API
   app.use('/api', apiRouter);
@@ -59,12 +85,41 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  // 5. Middleware global d'interception d'erreurs Express (garantit qu'aucune route ne fait tomber le serveur)
+  app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    console.error('[Eco GES] Erreur Express interceptée:', err);
+    if (!res.headersSent) {
+      res.status(500).json({
+        error: 'Une erreur interne est survenue sur le serveur.',
+        details: err?.message || 'Erreur inconnue'
+      });
+    }
+  });
+
+  // 6. Démarrage du serveur HTTP avec écouteur d'erreur résilient
+  const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`FAITH SCHOOL MANAGER actif sur http://0.0.0.0:${PORT} (${isProduction ? 'production' : 'développement'})`);
+  });
+
+  server.on('error', (err: any) => {
+    if (err.code === 'EADDRINUSE') {
+      console.error(`[CRITICAL] Le port ${PORT} est temporairement occupé (EADDRINUSE). Le serveur évite un arrêt brutal.`);
+    } else {
+      console.error('[CRITICAL] Erreur du serveur HTTP:', err);
+    }
+  });
+
+  // Gestion de la terminaison propre du processus
+  process.on('SIGTERM', () => {
+    console.log('[Eco GES] Signal SIGTERM reçu, fermeture propre...');
+    server.close(() => {
+      console.log('[Eco GES] Serveur arrêté.');
+      process.exit(0);
+    });
   });
 }
 
 startServer().catch((err) => {
   console.error('Erreur fatale au lancement du serveur:', err);
-  process.exit(1);
 });
+

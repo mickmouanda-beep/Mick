@@ -1652,7 +1652,7 @@ export const FinanceView: React.FC = () => {
                   <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-2.5" />
                   <input
                     type="text"
-                    placeholder="Filtrer par nom, prénom ou matricule (ex: BAYAKALA, FSM-2026-0001)..."
+                    placeholder="Filtrer par nom, prénom ou matricule (ex: BAYAKALA, GS-EDK-2026/27-0001)..."
                     value={studentSearchFilter}
                     onChange={(e) => setStudentSearchFilter(e.target.value)}
                     className="w-full pl-8 pr-3 py-1.5 bg-slate-800 border border-slate-700 rounded-lg text-white text-xs placeholder:text-slate-500"

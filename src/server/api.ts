@@ -98,6 +98,8 @@ import {
   deleteCurriculumProgramDoc,
   listStudentCourseAttendances,
   setStudentCourseAttendance,
+  formatAcademicYearForMatricule,
+  generateNextStudentMatricule,
 } from './firestore_db.ts';
 import {
   executeDualWrite,
@@ -109,7 +111,6 @@ import {
   MIGRATION_TABLE_MAPPINGS,
   runSqliteToFirestoreMigration
 } from './firestore_migration.ts';
-import { queryAll, queryOne, run, saveDb } from './db.ts';
 
 const api = Router();
 
@@ -492,18 +493,28 @@ api.post('/auth/login', async (req: Request, res: Response) => {
     }
 
     if (establishmentCode && !targetEstablishmentId) {
-       return res.status(404).json({ error: `Aucun établissement trouvé avec le code "${establishmentCode}".` });
+       recordLoginAttempt(rateKey, false);
+       return res.status(401).json({ error: "Code d'établissement, identifiant ou mot de passe incorrect." });
     }
 
-    // 2. Recherche des utilisateurs dans Firestore
+    // 2. Si aucun code/ID d'établissement n'est fourni, vérifier s'il s'agit du compte Développeur / App Manager (ADMIN_GENERAL)
+    if (!targetEstablishmentId) {
+      const globalAdmins = await findUsersByUsernameOrEmail(username, undefined);
+      const isDevAdmin = globalAdmins.some((u: any) => u.role === 'ADMIN_GENERAL');
+      if (!isDevAdmin) {
+        return res.status(400).json({ error: "Le code d'établissement est obligatoire pour se connecter." });
+      }
+    }
+
+    // 3. Recherche des utilisateurs STRICTEMENT DANS CET ÉTABLISSEMENT
     const potentialUsers = await findUsersByUsernameOrEmail(username, targetEstablishmentId || undefined);
 
     if (potentialUsers.length === 0) {
       recordLoginAttempt(rateKey, false);
-      return res.status(401).json({ error: 'Identifiant ou mot de passe incorrect.' });
+      return res.status(401).json({ error: "Code d'établissement, identifiant ou mot de passe incorrect." });
     }
 
-    // 3. Vérifier le mot de passe
+    // 4. Vérifier le mot de passe
     const validUsers: any[] = [];
     for (const u of potentialUsers) {
       const match = await comparePassword(password, u.password_hash);
@@ -524,25 +535,7 @@ api.post('/auth/login', async (req: Request, res: Response) => {
 
     if (validUsers.length === 0) {
       recordLoginAttempt(rateKey, false);
-      return res.status(401).json({ error: 'Identifiant ou mot de passe incorrect.' });
-    }
-
-    // 4. Si plusieurs établissements correspondent
-    if (validUsers.length > 1 && !targetEstablishmentId) {
-      const schoolOptions = validUsers.map((u) => ({
-        id: u.establishment_id,
-        name: u.establishment_name,
-        code: u.establishment_code,
-        city: u.establishment_city,
-        role: u.role,
-        academic_year: u.academic_year,
-      }));
-
-      return res.json({
-        requireEstablishmentSelection: true,
-        message: "Votre compte est associé à plusieurs établissements. Veuillez choisir l'établissement auquel vous connecter.",
-        establishments: schoolOptions,
-      });
+      return res.status(401).json({ error: "Code d'établissement, identifiant ou mot de passe incorrect." });
     }
 
     const user = validUsers[0];
@@ -2090,13 +2083,7 @@ api.post('/academic/classes', authenticateToken, requireRole(['PROMOTEUR', 'DIRE
       docId: id,
       operation: 'CREATE',
       payload: classPayload,
-      sqliteWriter: () => {
-        run(`
-          INSERT INTO classes (
-            id, establishment_id, academic_year, name, cycle_code, level_code, serie_code, room, capacity, main_teacher_id
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `, [id, req.user!.establishment_id, academicYear, finalName, cycleCode, levelCode, validatedSerie, room || null, capacity || 40, mainTeacherId || null]);
-      }
+      sqliteWriter: () => {}
     });
 
     logAudit(req.user!.establishment_id, req.user!.id, req.user!.full_name, 'CREATION_CLASSE', 'CLASS', id, {
@@ -2135,13 +2122,7 @@ api.put('/academic/classes/:id', authenticateToken, requireRole(['PROMOTEUR', 'D
       docId: req.params.id,
       operation: 'UPDATE',
       payload,
-      sqliteWriter: () => {
-        run(`
-          UPDATE classes
-          SET name = COALESCE(?, name), room = ?, capacity = ?, main_teacher_id = ?, status = ?
-          WHERE id = ? AND establishment_id = ?
-        `, [payload.name || null, room || null, capacity || 40, mainTeacherId || null, status || 'ACTIVE', req.params.id, req.user!.establishment_id]);
-      }
+      sqliteWriter: () => {}
     });
 
     res.json({ message: 'Classe mise à jour avec succès.', syncStatus: dualResult.syncStatus });
@@ -2167,9 +2148,7 @@ api.delete('/academic/classes/:id', authenticateToken, requireRole(['PROMOTEUR',
       collectionPath: `establishments/${req.user!.establishment_id}/classes`,
       docId: req.params.id,
       operation: 'DELETE',
-      sqliteWriter: () => {
-        run('DELETE FROM classes WHERE id = ? AND establishment_id = ?', [req.params.id, req.user!.establishment_id]);
-      }
+      sqliteWriter: () => {}
     });
 
     res.json({ message: 'Classe supprimée avec succès.', syncStatus: dualResult.syncStatus });
@@ -2285,8 +2264,9 @@ api.post('/academic/classes/:id/subjects', authenticateToken, requireRole(['PROM
 
     if (!subjectId) return res.status(400).json({ error: 'Matière requise.' });
 
-    // Vérifier si une affectation existe déjà pour cette classe et cette matière
-    const existing = queryOne<any>('SELECT id FROM class_subjects WHERE class_id = ? AND subject_id = ?', [classId, subjectId]);
+    // Vérifier si une affectation existe déjà pour cette classe et cette matière dans Firestore
+    const allClassSubjects = await listTenantDocs<any>(req.user!.establishment_id, 'class_subjects').catch(() => []);
+    const existing = (allClassSubjects || []).find((cs: any) => cs.class_id === classId && cs.subject_id === subjectId);
     const id = existing?.id || `CS-${Date.now().toString(36).toUpperCase()}`;
     const op = existing ? 'UPDATE' : 'CREATE';
 
@@ -2307,12 +2287,7 @@ api.post('/academic/classes/:id/subjects', authenticateToken, requireRole(['PROM
       docId: id,
       operation: op,
       payload,
-      sqliteWriter: () => {
-        run(`
-          INSERT OR REPLACE INTO class_subjects (id, class_id, subject_id, teacher_id, coefficient, weekly_hours)
-          VALUES (?, ?, ?, ?, ?, ?)
-        `, [id, classId, subjectId, teacherId || null, payload.coefficient, payload.weekly_hours]);
-      }
+      sqliteWriter: () => {}
     });
 
     logAudit(req.user!.establishment_id, req.user!.id, req.user!.full_name, 'AFFECTATION_MATIERE_CLASSE', 'CLASS_SUBJECT', id, {
@@ -2661,11 +2636,13 @@ export async function linkOrUpdateGuardianAndParent(
   const cleanEmail = guardianData.email ? guardianData.email.trim().toLowerCase() : null;
   const guardianName = (guardianData.name || '').trim();
 
-  // 1. Chercher un tuteur existant dans Firestore
+  // 1. Chercher un tuteur existant dans Firestore STRICTEMENT DANS CET ÉTABLISSEMENT
   const rawGuardians = await listTenantDocs<any>(estId, 'guardians').catch(() => []);
   let matchingG = (rawGuardians || []).find((g: any) =>
-    (normPhone && normalizePhone(g.phone) === normPhone) ||
-    (cleanEmail && (g.email || '').trim().toLowerCase() === cleanEmail)
+    g.establishment_id === estId && (
+      (normPhone && normalizePhone(g.phone) === normPhone) ||
+      (cleanEmail && (g.email || '').trim().toLowerCase() === cleanEmail)
+    )
   );
 
   let guardianId: string;
@@ -2682,9 +2659,10 @@ export async function linkOrUpdateGuardianAndParent(
     guardianStudentIds = [studentId];
   }
 
-  // 2. Chercher ou créer le compte utilisateur Parent (role = PARENT)
+  // 2. Chercher ou créer le compte utilisateur Parent (role = PARENT) STRICTEMENT DANS CET ÉTABLISSEMENT
   const rawUsers = await listTenantUsers(estId).catch(() => []);
   let parentUser = (rawUsers || []).find((u: any) =>
+    u.establishment_id === estId &&
     u.role === 'PARENT' && (
       (normPhone && normalizePhone(u.phone || u.username) === normPhone) ||
       (cleanEmail && (u.email || '').trim().toLowerCase() === cleanEmail) ||
@@ -2704,7 +2682,7 @@ export async function linkOrUpdateGuardianAndParent(
     parentUser = {
       id: parentUserId,
       establishment_id: estId,
-      username: normPhone || cleanEmail || `parent_${Date.now()}`,
+      username: (normPhone || cleanEmail || `parent_${Date.now()}`).toLowerCase(),
       full_name: guardianName || 'Tuteur Légal',
       phone: normPhone || guardianData.phone,
       email: cleanEmail || null,
@@ -2718,12 +2696,13 @@ export async function linkOrUpdateGuardianAndParent(
     };
     await setTenantUser(estId, parentUser);
   } else {
-    // Parent existant : ajouter l'élève sans doublons
+    // Parent existant dans cet établissement : ajouter l'élève sans doublons
     const pStudentIds: string[] = Array.isArray(parentUser.studentIds) ? [...parentUser.studentIds] : [];
     if (!pStudentIds.includes(studentId)) {
       pStudentIds.push(studentId);
       parentUser = {
         ...parentUser,
+        establishment_id: estId,
         studentIds: pStudentIds,
         updated_at: new Date().toISOString(),
       };
@@ -2754,6 +2733,7 @@ export async function linkOrUpdateGuardianAndParent(
 
     const updatedStudent = {
       ...existingStudent,
+      establishment_id: estId,
       guardianIds: sGIds,
       parent_user_id: parentUser.id,
       guardian_name: guardianName || existingStudent.guardian_name,
@@ -2764,15 +2744,6 @@ export async function linkOrUpdateGuardianAndParent(
     };
     await setStudent(estId, updatedStudent);
   }
-
-  // Association SQLite si présente
-  try {
-    run(
-      `INSERT OR IGNORE INTO parent_students (id, parent_user_id, student_id, relationship, created_at)
-       VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)`,
-      [`PS-${parentUser.id}-${studentId}`, parentUser.id, studentId, guardianData.relation || 'Parent']
-    );
-  } catch {}
 
   return {
     guardianId,
@@ -2798,11 +2769,13 @@ export async function getAuthorizedChildIdsForParent(
     listTenantUsers(estId).catch(() => []),
   ]);
 
-  const parentUser = (rawUsers || []).find((u: any) => u.id === parentUserId);
+  const parentUser = (rawUsers || []).find((u: any) => u.id === parentUserId && u.establishment_id === estId);
   const guardianDocs = (rawGuardians || []).filter(
-    (g: any) => g.userId === parentUserId ||
-                (userPhoneNorm && normalizePhone(g.phone) === userPhoneNorm) ||
-                (parentEmail && (g.email || '').trim().toLowerCase() === parentEmail)
+    (g: any) => g.establishment_id === estId && (
+      g.userId === parentUserId ||
+      (userPhoneNorm && normalizePhone(g.phone) === userPhoneNorm) ||
+      (parentEmail && (g.email || '').trim().toLowerCase() === parentEmail)
+    )
   );
 
   const childIdSet = new Set<string>();
@@ -2820,17 +2793,15 @@ export async function getAuthorizedChildIdsForParent(
     }
   });
 
-  // 3. Liaison SQLite fallback
+  // 3. Liaison Firestore parent_students
   try {
-    const rows = queryAll<{ student_id: string }>(
-      'SELECT student_id FROM parent_students WHERE parent_user_id = ?',
-      [parentUserId]
-    );
-    rows.forEach(r => childIdSet.add(r.student_id));
+    const parentStudents = await listTenantDocs<any>(estId, 'parent_students').catch(() => []);
+    (parentStudents || []).filter((ps: any) => ps.establishment_id === estId && ps.parent_user_id === parentUserId).forEach((r: any) => childIdSet.add(r.student_id));
   } catch {}
 
   // 4. Élèves dont le champ parent_user_id, téléphone, email ou guardianIds correspond
   (rawStudents || []).forEach((s: any) => {
+    if (s.establishment_id !== estId) return;
     const matchParentUser = s.parent_user_id === parentUserId;
     const matchPhone = userPhoneNorm && normalizePhone(s.guardian_phone) === userPhoneNorm;
     const matchEmail = parentEmail && (s.guardian_email || '').trim().toLowerCase() === parentEmail;
@@ -2850,12 +2821,13 @@ async function provisionAccountsForStudent(estId: string, studentId: string) {
   if (!student) throw new Error("Dossier élève introuvable.");
 
   const existingUsers = (await listTenantUsers(estId)) || [];
+  const tenantUsers = existingUsers.filter((u: any) => u.establishment_id === estId);
   const normGuardianPhone = normalizePhone(student.guardian_phone || '');
   const cleanGuardianEmail = (student.guardian_email || '').trim().toLowerCase();
 
   // 1. Compte Élève (Nom d'utilisateur = Matricule)
   const cleanMatricule = (student.matricule || '').trim().toLowerCase();
-  let studentUser = existingUsers.find((u: any) =>
+  let studentUser = tenantUsers.find((u: any) =>
     (u.student_id && u.student_id === studentId) ||
     (u.role === 'ELEVE' && (u.username || '').trim().toLowerCase() === cleanMatricule)
   );
@@ -2881,15 +2853,15 @@ async function provisionAccountsForStudent(estId: string, studentId: string) {
     await setTenantUser(estId, studentUser);
   } else {
     if (!studentUser.student_id) {
-      studentUser = { ...studentUser, student_id: studentId, updated_at: new Date().toISOString() };
+      studentUser = { ...studentUser, establishment_id: estId, student_id: studentId, updated_at: new Date().toISOString() };
       await setTenantUser(estId, studentUser);
     }
   }
 
   // 2. Compte Parent / Tuteur
-  // Recherche d'un tuteur déjà existant dans l'établissement pour éviter tout doublon
-  let parentUser = existingUsers.find((u: any) => {
-    if (u.role !== 'PARENT') return false;
+  // Recherche d'un tuteur déjà existant STRICTEMENT DANS CET ÉTABLISSEMENT pour éviter tout doublon inter-écoles
+  let parentUser = tenantUsers.find((u: any) => {
+    if (u.role !== 'PARENT' || u.establishment_id !== estId) return false;
     const uPhoneNorm = normalizePhone(u.phone || u.username || '');
     const uEmail = (u.email || '').trim().toLowerCase();
 
@@ -2927,12 +2899,13 @@ async function provisionAccountsForStudent(estId: string, studentId: string) {
     };
     await setTenantUser(estId, parentUser);
   } else {
-    // Parent déjà existant : lier ce nouvel enfant à la liste de ses enfants
+    // Parent déjà existant dans cette école : lier ce nouvel enfant à la liste de ses enfants
     const existingStudentIds: string[] = Array.isArray(parentUser.studentIds) ? parentUser.studentIds : [];
     if (!existingStudentIds.includes(studentId)) {
       const updatedStudentIds = [...existingStudentIds, studentId];
       parentUser = {
         ...parentUser,
+        establishment_id: estId,
         studentIds: updatedStudentIds,
         updated_at: new Date().toISOString(),
       };
@@ -2940,23 +2913,29 @@ async function provisionAccountsForStudent(estId: string, studentId: string) {
     }
   }
 
-  // Association dans la table de liaison SQLite parent_students si disponible
+  // Association dans la collection Firestore parent_students
   try {
-    run(
-      `INSERT OR IGNORE INTO parent_students (id, parent_user_id, student_id, relationship, created_at)
-       VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)`,
-      [`PS-${parentUser.id}-${studentId}`, parentUser.id, studentId, student.guardian_relation || 'Parent']
-    );
+    const psId = `PS-${parentUser.id}-${studentId}`;
+    await setDocData(`establishments/${estId}/parent_students`, psId, {
+      id: psId,
+      establishment_id: estId,
+      parent_user_id: parentUser.id,
+      student_id: studentId,
+      relationship: student.guardian_relation || 'Parent',
+      created_at: new Date().toISOString()
+    });
   } catch {}
 
-  // Synchronisation avec la fiche tuteur dans la collection guardians
+  // Synchronisation avec la fiche tuteur dans la collection guardians de cet établissement
   let linkedGuardianIds: string[] = Array.isArray(student.guardianIds) ? [...student.guardianIds] : [];
   try {
     const rawGuardians = await listTenantDocs<any>(estId, 'guardians');
     const matchingG = (rawGuardians || []).find((g: any) =>
-      (normGuardianPhone && normalizePhone(g.phone) === normGuardianPhone) ||
-      (cleanGuardianEmail && (g.email || '').trim().toLowerCase() === cleanGuardianEmail) ||
-      (student.guardianIds && Array.isArray(student.guardianIds) && student.guardianIds.includes(g.id))
+      g.establishment_id === estId && (
+        (normGuardianPhone && normalizePhone(g.phone) === normGuardianPhone) ||
+        (cleanGuardianEmail && (g.email || '').trim().toLowerCase() === cleanGuardianEmail) ||
+        (student.guardianIds && Array.isArray(student.guardianIds) && student.guardianIds.includes(g.id))
+      )
     );
 
     if (matchingG) {
@@ -2965,6 +2944,7 @@ async function provisionAccountsForStudent(estId: string, studentId: string) {
         const newStudentIds = Array.from(new Set([...gStudentIds, studentId]));
         await setGuardian(estId, matchingG.id, {
           ...matchingG,
+          establishment_id: estId,
           userId: parentUser.id,
           studentIds: newStudentIds,
           updated_at: new Date().toISOString(),
@@ -2981,6 +2961,7 @@ async function provisionAccountsForStudent(estId: string, studentId: string) {
   // Mettre à jour l'élève avec les liaisons utilisateur & gardien
   const updatedStudent = {
     ...student,
+    establishment_id: estId,
     user_id: studentUser.id,
     parent_user_id: parentUser.id,
     guardianIds: linkedGuardianIds,
@@ -3004,7 +2985,7 @@ async function provisionAccountsForStudent(estId: string, studentId: string) {
       phone: parentUser.phone,
       email: parentUser.email,
       role: 'PARENT',
-      temporaryPassword: parentTempPass || '•••••••• (Compte tuteur déjà existant conservé)',
+      temporaryPassword: parentTempPass || '•••••••• (Compte tuteur de cet établissement conservé)',
       isNew: isNewParentAccount,
       linkedStudentsCount: (parentUser.studentIds || [studentId]).length,
     },
@@ -3062,16 +3043,9 @@ api.post('/students', authenticateToken, requireRole(['PROMOTEUR', 'DIRECTEUR_GE
       }
     }
 
-    // Génération automatique du matricule unique pour l'établissement
-    const existingMatricules = new Set((existingStudents || []).map((s: any) => (s.matricule || '').toUpperCase()));
-    let seqMat = (existingStudents || []).length + 1;
-    let matricule = `FSM-${academicYear.slice(0, 4)}-${seqMat.toString().padStart(4, '0')}`;
-    let attemptsMat = 0;
-    while (existingMatricules.has(matricule.toUpperCase()) && attemptsMat < 1000) {
-      seqMat++;
-      matricule = `FSM-${academicYear.slice(0, 4)}-${seqMat.toString().padStart(4, '0')}`;
-      attemptsMat++;
-    }
+    // Génération automatique du matricule unique pour l'établissement via transaction Firestore (CODEECOLE-ANNÉESCOLAIRE-NUMÉRO)
+    const schoolCode = est?.code || 'ECO';
+    const matricule = await generateNextStudentMatricule(estId, schoolCode, academicYear);
 
     const studentId = `STU-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).substring(2, 6).toUpperCase()}`;
 
@@ -3244,33 +3218,46 @@ api.post('/students/:id/activation-code', authenticateToken, requireRole(['PROMO
 export async function executeParentStudentLinksRepair(estId: string, dryRun: boolean) {
   const students = await listTenantDocs<any>(estId, 'students').catch(() => []);
   const guardians = await listTenantDocs<any>(estId, 'guardians').catch(() => []);
-  const users = await listTenantDocs<any>(estId, 'users').catch(() => []);
+  const users = await listTenantUsers(estId).catch(() => []);
 
-  const parentUsers = (users || []).filter((u: any) => u.role === 'PARENT');
+  const parentUsers = (users || []).filter((u: any) => u.establishment_id === estId && u.role === 'PARENT');
   const report: any[] = [];
   let repairedCount = 0;
   let unlinkedCount = 0;
 
   for (const student of students) {
+    if (student.establishment_id && student.establishment_id !== estId) continue;
     const phoneNorm = normalizePhone(student.guardian_phone || '');
     const emailNorm = (student.guardian_email || '').trim().toLowerCase();
 
-    // 1. Trouver la fiche tuteur correspondante
+    // 1. Trouver la fiche tuteur correspondante DANS CET ÉTABLISSEMENT
     let matchingGuardian = (guardians || []).find((g: any) =>
-      (phoneNorm && normalizePhone(g.phone) === phoneNorm) ||
-      (emailNorm && (g.email || '').trim().toLowerCase() === emailNorm) ||
-      (student.guardianIds && Array.isArray(student.guardianIds) && student.guardianIds.includes(g.id))
+      g.establishment_id === estId && (
+        (phoneNorm && normalizePhone(g.phone) === phoneNorm) ||
+        (emailNorm && (g.email || '').trim().toLowerCase() === emailNorm) ||
+        (student.guardianIds && Array.isArray(student.guardianIds) && student.guardianIds.includes(g.id))
+      )
     );
 
-    // 2. Trouver le compte utilisateur parent correspondant
+    // 2. Trouver le compte utilisateur parent correspondant DANS CET ÉTABLISSEMENT
     let matchingParentUser = parentUsers.find((u: any) =>
-      u.id === student.parent_user_id ||
-      (phoneNorm && normalizePhone(u.phone || u.username) === phoneNorm) ||
-      (emailNorm && (u.email || '').trim().toLowerCase() === emailNorm) ||
-      (Array.isArray(u.studentIds) && u.studentIds.includes(student.id))
+      u.establishment_id === estId && (
+        u.id === student.parent_user_id ||
+        (phoneNorm && normalizePhone(u.phone || u.username) === phoneNorm) ||
+        (emailNorm && (u.email || '').trim().toLowerCase() === emailNorm) ||
+        (Array.isArray(u.studentIds) && u.studentIds.includes(student.id))
+      )
     );
 
     const changes: string[] = [];
+
+    // Si l'élève avait un parent_user_id d'un autre établissement, le nettoyer
+    if (student.parent_user_id && !matchingParentUser) {
+      const isExternalUser = (users || []).some((u: any) => u.id === student.parent_user_id && u.establishment_id !== estId);
+      if (isExternalUser) {
+        changes.push(`Suppression de la liaison inter-écoles erronée vers l'utilisateur parent [${student.parent_user_id}]`);
+      }
+    }
 
     if (matchingGuardian) {
       // Vérification guardianIds sur l'élève
@@ -3297,6 +3284,7 @@ export async function executeParentStudentLinksRepair(estId: string, dryRun: boo
       if (!dryRun && changes.length > 0) {
         await setGuardian(estId, matchingGuardian.id, {
           ...matchingGuardian,
+          establishment_id: estId,
           userId: newGUserId,
           studentIds: gStudentIds,
           updated_at: new Date().toISOString(),
@@ -3304,8 +3292,9 @@ export async function executeParentStudentLinksRepair(estId: string, dryRun: boo
 
         await setStudent(estId, {
           ...student,
+          establishment_id: estId,
           guardianIds: studentGIds,
-          parent_user_id: matchingParentUser ? matchingParentUser.id : student.parent_user_id,
+          parent_user_id: matchingParentUser ? matchingParentUser.id : (student.parent_user_id && matchingParentUser ? student.parent_user_id : null),
           updated_at: new Date().toISOString(),
         });
       }
@@ -3321,6 +3310,7 @@ export async function executeParentStudentLinksRepair(estId: string, dryRun: boo
         if (!dryRun) {
           await setTenantUser(estId, {
             ...matchingParentUser,
+            establishment_id: estId,
             studentIds: pStudentIds,
             updated_at: new Date().toISOString(),
           });
@@ -3330,6 +3320,7 @@ export async function executeParentStudentLinksRepair(estId: string, dryRun: boo
       if (!dryRun && (!student.parent_user_id || student.parent_user_id !== matchingParentUser.id)) {
         await setStudent(estId, {
           ...student,
+          establishment_id: estId,
           parent_user_id: matchingParentUser.id,
           updated_at: new Date().toISOString(),
         });
@@ -3382,6 +3373,146 @@ api.post('/academic/repair-parent-student-links', authenticateToken, requireRole
     res.status(500).json({ error: error.message || 'Erreur lors de la réparation des liaisons.' });
   }
 });
+
+export interface MatriculeMigrationReportItem {
+  studentId: string;
+  studentName: string;
+  establishmentId: string;
+  establishmentName: string;
+  schoolCode: string;
+  oldMatricule: string;
+  newMatricule: string;
+  academicYear: string;
+}
+
+export async function runStudentMatriculeMigration(dryRun: boolean = false): Promise<MatriculeMigrationReportItem[]> {
+  const allEsts = await listEstablishments();
+  const report: MatriculeMigrationReportItem[] = [];
+
+  for (const est of allEsts) {
+    if (!est || !est.id || est.code === 'ECO-HQ') continue;
+
+    const estId = est.id;
+    const schoolCode = est.code || 'ECO';
+
+    // Lecture des élèves
+    const rawStudents = await listSubcollectionDocs<any>(estId, 'students').catch(() => []);
+    const rootStudents = await queryDocs<any>('students', 'establishment_id', '==', estId).catch(() => []);
+    const studentMap = new Map<string, any>();
+    for (const s of [...rawStudents, ...rootStudents]) {
+      if (s && s.id) studentMap.set(s.id, s);
+    }
+    const students = Array.from(studentMap.values());
+
+    // Lecture des utilisateurs de cet établissement
+    const rawTenantUsers = await listTenantUsers(estId).catch(() => []);
+
+    // Filtrer les élèves au format obsolète
+    const legacyStudents = students.filter((s: any) => {
+      const mat = (s.matricule || '').trim();
+      if (!mat) return true;
+      const cleanSchoolCodePattern = schoolCode.replace(/[^A-Z0-9-]/gi, '');
+      const isNewPattern = new RegExp(`^${cleanSchoolCodePattern}-\\d{4}\\/\\d{2}-\\d{4}$`, 'i').test(mat);
+      return !isNewPattern;
+    });
+
+    if (legacyStudents.length === 0) continue;
+
+    // Trier les élèves par date d'inscription / création
+    legacyStudents.sort((a, b) => (a.created_at || a.enrollment_date || a.id || '').localeCompare(b.created_at || b.enrollment_date || b.id || ''));
+
+    for (const student of legacyStudents) {
+      const oldMatricule = student.matricule || 'SANS_MATRICULE';
+      const academicYear = student.academic_year || est.academic_year || '2026-2027';
+
+      let newMatricule = '';
+      if (dryRun) {
+        const formattedYear = formatAcademicYearForMatricule(academicYear);
+        newMatricule = `${schoolCode}-${formattedYear}-PREVIEW`;
+      } else {
+        newMatricule = await generateNextStudentMatricule(estId, schoolCode, academicYear);
+      }
+
+      report.push({
+        studentId: student.id,
+        studentName: `${student.last_name || ''} ${student.first_name || ''}`.trim(),
+        establishmentId: estId,
+        establishmentName: est.name || '',
+        schoolCode,
+        oldMatricule,
+        newMatricule,
+        academicYear,
+      });
+
+      if (!dryRun) {
+        // 1. Mise à jour de la fiche élève
+        const updatedStudent = {
+          ...student,
+          establishment_id: estId,
+          matricule: newMatricule,
+          updated_at: new Date().toISOString(),
+        };
+        await setStudent(estId, updatedStudent);
+
+        // 2. Mise à jour du compte de connexion utilisateur élève
+        const oldCleanMat = oldMatricule.trim().toLowerCase();
+        const newCleanMat = newMatricule.trim().toLowerCase();
+
+        const studentUsers = rawTenantUsers.filter((u: any) =>
+          u.role === 'ELEVE' && (
+            (u.student_id && u.student_id === student.id) ||
+            (u.username && u.username.trim().toLowerCase() === oldCleanMat)
+          )
+        );
+
+        for (const uDoc of studentUsers) {
+          const updatedUser = {
+            ...uDoc,
+            establishment_id: estId,
+            username: newCleanMat,
+            student_id: student.id,
+            updated_at: new Date().toISOString(),
+          };
+          await setTenantUser(estId, updatedUser);
+        }
+      }
+    }
+  }
+
+  return report;
+}
+
+api.post('/students/migrate-matricules', authenticateToken, requireRole(['PROMOTEUR', 'DIRECTEUR_GENERAL', 'ADMIN_GENERAL']), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { dryRun } = req.body;
+    const report = await runStudentMatriculeMigration(!!dryRun);
+    res.json({
+      message: dryRun
+        ? `Migration des matricules analysée (Dry-Run) : ${report.length} élève(s) à migrer.`
+        : `Migration des matricules terminée avec succès : ${report.length} élève(s) migré(s).`,
+      count: report.length,
+      report,
+    });
+  } catch (error: any) {
+    console.error('Erreur migration des matricules:', error);
+    res.status(500).json({ error: error.message || 'Erreur lors de la migration des matricules.' });
+  }
+});
+
+api.post('/migration/run-matricules', authenticateToken, requireRole(['ADMIN_GENERAL', 'PROMOTEUR']), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { dryRun } = req.body;
+    const report = await runStudentMatriculeMigration(!!dryRun);
+    res.json({
+      message: `Migration des matricules terminée. ${report.length} élève(s) migré(s).`,
+      count: report.length,
+      report,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Erreur lors de la migration des matricules.' });
+  }
+});
+
 
 api.put('/students/:id', authenticateToken, requireRole(['PROMOTEUR', 'DIRECTEUR_GENERAL', 'DIRECTEUR_ETUDES', 'GESTIONNAIRE']), async (req: AuthenticatedRequest, res: Response) => {
   try {
@@ -3586,7 +3717,8 @@ api.post('/teachers/:id/assignments', authenticateToken, requireRole(['PROMOTEUR
       return res.status(400).json({ error: 'Classe et matière obligatoires.' });
     }
 
-    const existing = queryOne<any>('SELECT id FROM class_subjects WHERE class_id = ? AND subject_id = ?', [classId, subjectId]);
+    const allClassSubjects = await listTenantDocs<any>(req.user!.establishment_id, 'class_subjects').catch(() => []);
+    const existing = (allClassSubjects || []).find((cs: any) => cs.class_id === classId && cs.subject_id === subjectId);
     const id = existing?.id || `CS-${Date.now().toString(36).toUpperCase()}`;
     const op = existing ? 'UPDATE' : 'CREATE';
 
@@ -3607,12 +3739,7 @@ api.post('/teachers/:id/assignments', authenticateToken, requireRole(['PROMOTEUR
       docId: id,
       operation: op,
       payload,
-      sqliteWriter: () => {
-        run(`
-          INSERT OR REPLACE INTO class_subjects (id, class_id, subject_id, teacher_id, coefficient, weekly_hours)
-          VALUES (?, ?, ?, ?, ?, ?)
-        `, [id, classId, subjectId, teacherId, payload.coefficient, payload.weekly_hours]);
-      }
+      sqliteWriter: () => {}
     });
 
     logAudit(req.user!.establishment_id, req.user!.id, req.user!.full_name, 'AFFECTATION_ENSEIGNANT', 'CLASS_SUBJECT', id, {
@@ -3631,7 +3758,11 @@ api.post('/teachers/:id/assignments', authenticateToken, requireRole(['PROMOTEUR
 api.delete('/teachers/:id/assignments/:classSubjectId', authenticateToken, requireRole(['PROMOTEUR', 'DIRECTEUR_GENERAL', 'DIRECTEUR_ETUDES']), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { classSubjectId } = req.params;
-    run('UPDATE class_subjects SET teacher_id = NULL WHERE id = ?', [classSubjectId]);
+    const estId = req.user!.establishment_id;
+    await updateDocData(`establishments/${estId}/class_subjects`, classSubjectId, {
+      teacher_id: null,
+      updated_at: new Date().toISOString(),
+    });
     res.json({ message: 'Affectation retirée avec succès.' });
   } catch (error: any) {
     res.status(500).json({ error: 'Erreur lors du retrait de l’affectation.' });
@@ -3737,23 +3868,22 @@ api.get('/academic/schedules', authenticateToken, async (req: AuthenticatedReque
   }
 });
 
-// Journal d'audit des emplois du temps
-api.get('/academic/schedules/audits', authenticateToken, requireRole(['DIRECTEUR_GENERAL', 'DIRECTEUR_ETUDES', 'PROMOTEUR', 'ADMIN_GENERAL']), (req: AuthenticatedRequest, res: Response) => {
+// Journal d'audit des emplois du temps (100% Cloud Firestore)
+api.get('/academic/schedules/audits', authenticateToken, requireRole(['DIRECTEUR_GENERAL', 'DIRECTEUR_ETUDES', 'PROMOTEUR', 'ADMIN_GENERAL']), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const estId = req.user!.establishment_id;
-    const audits = queryAll<any>(`
-      SELECT id, establishment_id, user_id, user_name, action, entity_type, entity_id, details, ip_address, created_at
-      FROM audit_logs
-      WHERE establishment_id = ? AND entity_type = 'SCHEDULE'
-      ORDER BY created_at DESC LIMIT 60
-    `, [estId]);
+    const allAudits = await listSubcollectionDocs<any>(estId, 'audit_logs').catch(() => []);
+    const audits = (allAudits || [])
+      .filter((a: any) => a.entity_type === 'SCHEDULE')
+      .sort((a: any, b: any) => (b.created_at || '').localeCompare(a.created_at || ''))
+      .slice(0, 60);
     res.json(audits);
   } catch (error: any) {
     res.status(500).json({ error: 'Erreur lors de la récupération du journal d’audit des emplois du temps.' });
   }
 });
 
-// Création d'un créneau (STRICTEMENT RÉSERVÉ au Directeur Général et au Directeur des Études)
+// Création d'un créneau (STRICTEMENT RÉSERVÉ au Directeur Général et au Directeur des Études - 100% Firestore)
 api.post('/academic/schedules', authenticateToken, requireRole(['DIRECTEUR_GENERAL', 'DIRECTEUR_ETUDES']), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { classId, teacherId, subjectId, dayOfWeek, startTime, endTime, room, isPublished } = req.body;
@@ -3769,66 +3899,43 @@ api.post('/academic/schedules', authenticateToken, requireRole(['DIRECTEUR_GENER
     const estId = req.user!.establishment_id;
     const day = Number(dayOfWeek);
 
-    // 1. Détection de conflit enseignant
-    const teacherConflict = queryOne<any>(`
-      SELECT ts.*, c.name as conflict_class_name, s.name as conflict_subject_name
-      FROM teacher_schedules ts
-      JOIN classes c ON ts.class_id = c.id
-      JOIN subjects s ON ts.subject_id = s.id
-      WHERE (ts.establishment_id = ? OR c.establishment_id = ?)
-        AND ts.teacher_id = ?
-        AND ts.day_of_week = ?
-        AND NOT (ts.end_time <= ? OR ts.start_time >= ?)
-      LIMIT 1
-    `, [estId, estId, teacherId, day, startTime, endTime]);
+    const [allSchedules, allClasses, allSubjects, allUsers] = await Promise.all([
+      listSchedules(estId),
+      listClasses(estId),
+      listSubjects(estId),
+      listTenantUsers(estId)
+    ]);
+    const classMap = new Map((allClasses || []).map((c: any) => [c.id, c.name]));
+    const subjectMap = new Map((allSubjects || []).map((s: any) => [s.id, s.name]));
+    const userMap = new Map((allUsers || []).map((u: any) => [u.id, u.full_name]));
 
+    const isOverlap = (ts: any) => Number(ts.day_of_week) === day && !(ts.end_time <= startTime || ts.start_time >= endTime);
+
+    // 1. Détection de conflit enseignant
+    const teacherConflict = (allSchedules || []).find((ts: any) => ts.teacher_id === teacherId && isOverlap(ts));
     if (teacherConflict) {
       return res.status(409).json({
-        error: `Conflit enseignant : Cet enseignant est déjà programmé pour le cours de "${teacherConflict.conflict_subject_name}" en "${teacherConflict.conflict_class_name}" le même jour de ${teacherConflict.start_time} à ${teacherConflict.end_time}.`,
+        error: `Conflit enseignant : Cet enseignant est déjà programmé pour le cours de "${subjectMap.get(teacherConflict.subject_id) || 'Matière'}" en "${classMap.get(teacherConflict.class_id) || 'Classe'}" le même jour de ${teacherConflict.start_time} à ${teacherConflict.end_time}.`,
         conflictType: 'TEACHER',
       });
     }
 
     // 2. Détection de conflit classe
-    const classConflict = queryOne<any>(`
-      SELECT ts.*, u.full_name as conflict_teacher_name, s.name as conflict_subject_name
-      FROM teacher_schedules ts
-      JOIN users u ON ts.teacher_id = u.id
-      JOIN subjects s ON ts.subject_id = s.id
-      JOIN classes c ON ts.class_id = c.id
-      WHERE (ts.establishment_id = ? OR c.establishment_id = ?)
-        AND ts.class_id = ?
-        AND ts.day_of_week = ?
-        AND NOT (ts.end_time <= ? OR ts.start_time >= ?)
-      LIMIT 1
-    `, [estId, estId, classId, day, startTime, endTime]);
-
+    const classConflict = (allSchedules || []).find((ts: any) => ts.class_id === classId && isOverlap(ts));
     if (classConflict) {
       return res.status(409).json({
-        error: `Conflit de classe : Cette classe a déjà un cours de "${classConflict.conflict_subject_name}" avec ${classConflict.conflict_teacher_name} de ${classConflict.start_time} à ${classConflict.end_time}.`,
+        error: `Conflit de classe : Cette classe a déjà un cours de "${subjectMap.get(classConflict.subject_id) || 'Matière'}" avec ${userMap.get(classConflict.teacher_id) || 'Enseignant'} de ${classConflict.start_time} à ${classConflict.end_time}.`,
         conflictType: 'CLASS',
       });
     }
 
     // 3. Détection de conflit de salle (si une salle est spécifiée)
     if (room && typeof room === 'string' && room.trim().length > 0) {
-      const roomClean = room.trim();
-      const roomConflict = queryOne<any>(`
-        SELECT ts.*, c.name as conflict_class_name, s.name as conflict_subject_name, u.full_name as conflict_teacher_name
-        FROM teacher_schedules ts
-        JOIN classes c ON ts.class_id = c.id
-        JOIN subjects s ON ts.subject_id = s.id
-        JOIN users u ON ts.teacher_id = u.id
-        WHERE (ts.establishment_id = ? OR c.establishment_id = ?)
-          AND LOWER(TRIM(ts.room)) = LOWER(?)
-          AND ts.day_of_week = ?
-          AND NOT (ts.end_time <= ? OR ts.start_time >= ?)
-        LIMIT 1
-      `, [estId, estId, roomClean, day, startTime, endTime]);
-
+      const roomClean = room.trim().toLowerCase();
+      const roomConflict = (allSchedules || []).find((ts: any) => ts.room && ts.room.trim().toLowerCase() === roomClean && isOverlap(ts));
       if (roomConflict) {
         return res.status(409).json({
-          error: `Conflit de salle : La salle "${roomClean}" est déjà réservée par le cours de "${roomConflict.conflict_subject_name}" (${roomConflict.conflict_class_name} avec ${roomConflict.conflict_teacher_name}) de ${roomConflict.start_time} à ${roomConflict.end_time}.`,
+          error: `Conflit de salle : La salle "${room.trim()}" est déjà réservée par le cours de "${subjectMap.get(roomConflict.subject_id) || 'Matière'}" (${classMap.get(roomConflict.class_id) || 'Classe'} avec ${userMap.get(roomConflict.teacher_id) || 'Enseignant'}) de ${roomConflict.start_time} à ${roomConflict.end_time}.`,
           conflictType: 'ROOM',
         });
       }
@@ -3859,12 +3966,7 @@ api.post('/academic/schedules', authenticateToken, requireRole(['DIRECTEUR_GENER
       docId: id,
       operation: 'CREATE',
       payload,
-      sqliteWriter: () => {
-        run(`
-          INSERT INTO teacher_schedules (id, establishment_id, teacher_id, class_id, subject_id, day_of_week, start_time, end_time, room, is_published, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `, [id, estId, teacherId, classId, subjectId, day, startTime, endTime, payload.room, pubVal, nowIso]);
-      }
+      sqliteWriter: () => {}
     });
 
     logAudit(estId, req.user!.id, req.user!.full_name, 'CREATION_CRENEAU_HORAIRE', 'SCHEDULE', id, {
@@ -3884,14 +3986,15 @@ api.post('/academic/schedules', authenticateToken, requireRole(['DIRECTEUR_GENER
   }
 });
 
-// Modification d'un créneau (STRICTEMENT RÉSERVÉ au Directeur Général et au Directeur des Études)
+// Modification d'un créneau (STRICTEMENT RÉSERVÉ au Directeur Général et au Directeur des Études - 100% Firestore)
 api.put('/academic/schedules/:id', authenticateToken, requireRole(['DIRECTEUR_GENERAL', 'DIRECTEUR_ETUDES']), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { id } = req.params;
     const { classId, teacherId, subjectId, dayOfWeek, startTime, endTime, room, isPublished } = req.body;
     const estId = req.user!.establishment_id;
 
-    const existing = queryOne<any>('SELECT * FROM teacher_schedules WHERE id = ?', [id]);
+    const allSchedules = await listSchedules(estId);
+    const existing = (allSchedules || []).find((s: any) => s.id === id);
     if (!existing) {
       return res.status(404).json({ error: 'Créneau horaire introuvable.' });
     }
@@ -3909,68 +4012,42 @@ api.put('/academic/schedules/:id', authenticateToken, requireRole(['DIRECTEUR_GE
       return res.status(400).json({ error: 'L’heure de début doit être strictement antérieure à l’heure de fin.' });
     }
 
-    // 1. Détection conflit enseignant
-    const teacherConflict = queryOne<any>(`
-      SELECT ts.*, c.name as conflict_class_name, s.name as conflict_subject_name
-      FROM teacher_schedules ts
-      JOIN classes c ON ts.class_id = c.id
-      JOIN subjects s ON ts.subject_id = s.id
-      WHERE (ts.establishment_id = ? OR c.establishment_id = ?)
-        AND ts.teacher_id = ?
-        AND ts.day_of_week = ?
-        AND ts.id != ?
-        AND NOT (ts.end_time <= ? OR ts.start_time >= ?)
-      LIMIT 1
-    `, [estId, estId, tId, day, id, sTime, eTime]);
+    const [allClasses, allSubjects, allUsers] = await Promise.all([
+      listClasses(estId),
+      listSubjects(estId),
+      listTenantUsers(estId)
+    ]);
+    const classMap = new Map((allClasses || []).map((c: any) => [c.id, c.name]));
+    const subjectMap = new Map((allSubjects || []).map((s: any) => [s.id, s.name]));
+    const userMap = new Map((allUsers || []).map((u: any) => [u.id, u.full_name]));
 
+    const isOverlap = (ts: any) => ts.id !== id && Number(ts.day_of_week) === day && !(ts.end_time <= sTime || ts.start_time >= eTime);
+
+    // 1. Détection conflit enseignant
+    const teacherConflict = (allSchedules || []).find((ts: any) => ts.teacher_id === tId && isOverlap(ts));
     if (teacherConflict) {
       return res.status(409).json({
-        error: `Conflit enseignant : Cet enseignant est déjà programmé pour le cours de "${teacherConflict.conflict_subject_name}" en "${teacherConflict.conflict_class_name}" de ${teacherConflict.start_time} à ${teacherConflict.end_time}.`,
+        error: `Conflit enseignant : Cet enseignant est déjà programmé pour le cours de "${subjectMap.get(teacherConflict.subject_id) || 'Matière'}" en "${classMap.get(teacherConflict.class_id) || 'Classe'}" de ${teacherConflict.start_time} à ${teacherConflict.end_time}.`,
         conflictType: 'TEACHER',
       });
     }
 
     // 2. Détection conflit classe
-    const classConflict = queryOne<any>(`
-      SELECT ts.*, u.full_name as conflict_teacher_name, s.name as conflict_subject_name
-      FROM teacher_schedules ts
-      JOIN users u ON ts.teacher_id = u.id
-      JOIN subjects s ON ts.subject_id = s.id
-      JOIN classes c ON ts.class_id = c.id
-      WHERE (ts.establishment_id = ? OR c.establishment_id = ?)
-        AND ts.class_id = ?
-        AND ts.day_of_week = ?
-        AND ts.id != ?
-        AND NOT (ts.end_time <= ? OR ts.start_time >= ?)
-      LIMIT 1
-    `, [estId, estId, cId, day, id, sTime, eTime]);
-
+    const classConflict = (allSchedules || []).find((ts: any) => ts.class_id === cId && isOverlap(ts));
     if (classConflict) {
       return res.status(409).json({
-        error: `Conflit de classe : Cette classe a déjà un cours de "${classConflict.conflict_subject_name}" avec ${classConflict.conflict_teacher_name} de ${classConflict.start_time} à ${classConflict.end_time}.`,
+        error: `Conflit de classe : Cette classe a déjà un cours de "${subjectMap.get(classConflict.subject_id) || 'Matière'}" avec ${userMap.get(classConflict.teacher_id) || 'Enseignant'} de ${classConflict.start_time} à ${classConflict.end_time}.`,
         conflictType: 'CLASS',
       });
     }
 
     // 3. Détection conflit de salle
     if (rm && rm.length > 0) {
-      const roomConflict = queryOne<any>(`
-        SELECT ts.*, c.name as conflict_class_name, s.name as conflict_subject_name, u.full_name as conflict_teacher_name
-        FROM teacher_schedules ts
-        JOIN classes c ON ts.class_id = c.id
-        JOIN subjects s ON ts.subject_id = s.id
-        JOIN users u ON ts.teacher_id = u.id
-        WHERE (ts.establishment_id = ? OR c.establishment_id = ?)
-          AND LOWER(TRIM(ts.room)) = LOWER(?)
-          AND ts.day_of_week = ?
-          AND ts.id != ?
-          AND NOT (ts.end_time <= ? OR ts.start_time >= ?)
-        LIMIT 1
-      `, [estId, estId, rm, day, id, sTime, eTime]);
-
+      const roomClean = rm.trim().toLowerCase();
+      const roomConflict = (allSchedules || []).find((ts: any) => ts.room && ts.room.trim().toLowerCase() === roomClean && isOverlap(ts));
       if (roomConflict) {
         return res.status(409).json({
-          error: `Conflit de salle : La salle "${rm}" est déjà réservée par le cours de "${roomConflict.conflict_subject_name}" (${roomConflict.conflict_class_name}) de ${roomConflict.start_time} à ${roomConflict.end_time}.`,
+          error: `Conflit de salle : La salle "${rm}" est déjà réservée par le cours de "${subjectMap.get(roomConflict.subject_id) || 'Matière'}" (${classMap.get(roomConflict.class_id) || 'Classe'}) de ${roomConflict.start_time} à ${roomConflict.end_time}.`,
           conflictType: 'ROOM',
         });
       }
@@ -3997,13 +4074,7 @@ api.put('/academic/schedules/:id', authenticateToken, requireRole(['DIRECTEUR_GE
       docId: id,
       operation: 'UPDATE',
       payload,
-      sqliteWriter: () => {
-        run(`
-          UPDATE teacher_schedules
-          SET class_id = ?, teacher_id = ?, subject_id = ?, day_of_week = ?, start_time = ?, end_time = ?, room = ?, is_published = ?, updated_at = ?
-          WHERE id = ?
-        `, [cId, tId, sId, day, sTime, eTime, rm, pubVal, nowIso, id]);
-      }
+      sqliteWriter: () => {}
     });
 
     logAudit(estId, req.user!.id, req.user!.full_name, 'MODIFICATION_CRENEAU_HORAIRE', 'SCHEDULE', id, {
@@ -4022,7 +4093,7 @@ api.put('/academic/schedules/:id', authenticateToken, requireRole(['DIRECTEUR_GE
   }
 });
 
-// Publication ou mise en brouillon des emplois du temps (DG et DE)
+// Publication ou mise en brouillon des emplois du temps (DG et DE - 100% Firestore)
 api.post('/academic/schedules/publish', authenticateToken, requireRole(['DIRECTEUR_GENERAL', 'DIRECTEUR_ETUDES']), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { classId, isPublished } = req.body;
@@ -4030,27 +4101,13 @@ api.post('/academic/schedules/publish', authenticateToken, requireRole(['DIRECTE
     const pubVal = isPublished === false ? 0 : 1;
     const nowIso = new Date().toISOString();
 
-    let sql = 'UPDATE teacher_schedules SET is_published = ?, updated_at = ? WHERE establishment_id = ?';
-    const params: any[] = [pubVal, nowIso, estId];
-    if (classId) {
-      sql += ' AND class_id = ?';
-      params.push(classId);
-    }
-    run(sql, params);
-
-    const affected = queryAll<any>(
-      `SELECT * FROM teacher_schedules WHERE establishment_id = ? ${classId ? 'AND class_id = ?' : ''}`,
-      classId ? [estId, classId] : [estId]
-    );
+    const allSchedules = await listSchedules(estId);
+    const affected = (allSchedules || []).filter((s: any) => !classId || s.class_id === classId);
 
     for (const item of affected) {
-      await executeDualWrite({
-        establishmentId: estId,
-        collectionPath: `establishments/${estId}/teacher_schedules`,
-        docId: item.id,
-        operation: 'UPDATE',
-        payload: { ...item, is_published: pubVal, updated_at: nowIso },
-        sqliteWriter: () => {}
+      await updateDocData(`establishments/${estId}/teacher_schedules`, item.id, {
+        is_published: pubVal,
+        updated_at: nowIso
       });
     }
 
@@ -4072,22 +4129,13 @@ api.post('/academic/schedules/publish', authenticateToken, requireRole(['DIRECTE
   }
 });
 
-// Suppression d'un créneau (STRICTEMENT RÉSERVÉ au Directeur Général et au Directeur des Études)
+// Suppression d'un créneau (STRICTEMENT RÉSERVÉ au Directeur Général et au Directeur des Études - 100% Firestore)
 api.delete('/academic/schedules/:id', authenticateToken, requireRole(['DIRECTEUR_GENERAL', 'DIRECTEUR_ETUDES']), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const id = req.params.id;
     const estId = req.user!.establishment_id;
 
-    await executeDualWrite({
-      establishmentId: estId,
-      collectionPath: `establishments/${estId}/teacher_schedules`,
-      docId: id,
-      operation: 'DELETE',
-      payload: { id },
-      sqliteWriter: () => {
-        run('DELETE FROM teacher_schedules WHERE id = ?', [id]);
-      }
-    });
+    await deleteDocData(`establishments/${estId}/teacher_schedules`, id);
 
     logAudit(estId, req.user!.id, req.user!.full_name, 'SUPPRESSION_CRENEAU_HORAIRE', 'SCHEDULE', id);
     res.json({ message: 'Créneau supprimé de l’emploi du temps.' });
@@ -4096,18 +4144,42 @@ api.delete('/academic/schedules/:id', authenticateToken, requireRole(['DIRECTEUR
   }
 });
 
-api.get('/teachers/my-assignments', authenticateToken, requireRole(['ENSEIGNANT']), (req: AuthenticatedRequest, res: Response) => {
-  const classes = queryAll(`
-    SELECT DISTINCT c.id as class_id, c.name as class_name, c.level_code, c.cycle_code, c.serie_code,
-      s.id as subject_id, s.name as subject_name, s.code as subject_code, cs.coefficient, cs.weekly_hours
-    FROM class_subjects cs
-    JOIN classes c ON cs.class_id = c.id
-    JOIN subjects s ON cs.subject_id = s.id
-    WHERE cs.teacher_id = ?
-    ORDER BY c.name ASC, s.name ASC
-  `, [req.user!.id]);
+api.get('/teachers/my-assignments', authenticateToken, requireRole(['ENSEIGNANT']), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const estId = req.user!.establishment_id;
+    const [allClassSubjects, allClasses, allSubjects] = await Promise.all([
+      listClassSubjects(estId),
+      listClasses(estId),
+      listSubjects(estId)
+    ]);
 
-  res.json(classes);
+    const classMap = new Map((allClasses || []).map((c: any) => [c.id, c]));
+    const subjectMap = new Map((allSubjects || []).map((s: any) => [s.id, s]));
+
+    const myAssignments = (allClassSubjects || [])
+      .filter((cs: any) => cs.teacher_id === req.user!.id)
+      .map((cs: any) => {
+        const cls = classMap.get(cs.class_id) || {};
+        const subj = subjectMap.get(cs.subject_id) || {};
+        return {
+          class_id: cs.class_id,
+          class_name: cls.name || 'Classe',
+          level_code: cls.level_code || null,
+          cycle_code: cls.cycle_code || null,
+          serie_code: cls.serie_code || null,
+          subject_id: cs.subject_id,
+          subject_name: subj.name || cs.subject_name || 'Matière',
+          subject_code: subj.code || cs.subject_code || '',
+          coefficient: cs.coefficient !== undefined ? Number(cs.coefficient) : 1.0,
+          weekly_hours: cs.weekly_hours !== undefined ? Number(cs.weekly_hours) : 2.0
+        };
+      })
+      .sort((a: any, b: any) => (a.class_name || '').localeCompare(b.class_name || '') || (a.subject_name || '').localeCompare(b.subject_name || ''));
+
+    res.json(myAssignments);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Erreur lors du chargement des affectations.' });
+  }
 });
 
 api.get('/teachers/course-logs', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
@@ -4142,23 +4214,34 @@ api.get('/teachers/course-logs', authenticateToken, async (req: AuthenticatedReq
   }
 });
 
-api.post('/teachers/course-logs', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+api.post('/teachers/course-logs', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { teacherId, classId, subjectId, date, hoursDone, status, topic, remarks } = req.body;
-
     const actualTeacherId = req.user!.role === 'ENSEIGNANT' ? req.user!.id : (teacherId || req.user!.id);
 
     if (!classId || !subjectId || !date || hoursDone === undefined) {
       return res.status(400).json({ error: 'Classe, matière, date et heures requises.' });
     }
 
+    const estId = req.user!.establishment_id;
     const id = `LOG-H-${Date.now().toString(36).toUpperCase()}`;
 
-    run(`
-      INSERT INTO teacher_course_logs (
-        id, establishment_id, teacher_id, class_id, subject_id, date, hours_done, status, topic, remarks
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `, [id, req.user!.establishment_id, actualTeacherId, classId, subjectId, date, hoursDone, status || 'EFFECTUE', topic || null, remarks || null]);
+    const payload = {
+      id,
+      establishment_id: estId,
+      teacher_id: actualTeacherId,
+      class_id: classId,
+      subject_id: subjectId,
+      date,
+      hours_done: Number(hoursDone),
+      status: status || 'EFFECTUE',
+      topic: topic || null,
+      remarks: remarks || null,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
+    };
+
+    await setDocData(`establishments/${estId}/teacher_course_logs`, id, payload);
 
     res.json({ message: 'Heures de cours enregistrées avec succès.' });
   } catch (error: any) {
@@ -4234,31 +4317,12 @@ api.post('/evaluations', authenticateToken, requireRole(['PROMOTEUR', 'DIRECTEUR
       return res.status(400).json({ error: 'Tous les champs obligatoires doivent être renseignés.' });
     }
 
-    const est = queryOne<{ academic_year: string }>('SELECT academic_year FROM establishments WHERE id = ?', [req.user!.establishment_id]);
+    const est: any = await getEstablishment(req.user!.establishment_id);
     const academicYear = est?.academic_year || '2026-2027';
 
     const id = `EVAL-${Date.now().toString(36).toUpperCase()}`;
 
-    run(`
-      INSERT INTO evaluations (
-        id, establishment_id, class_id, subject_id, academic_year, term, eval_type, title, date, max_score, coefficient, is_locked, created_by
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
-    `, [
-      id,
-      req.user!.establishment_id,
-      classId,
-      subjectId,
-      academicYear,
-      term,
-      evalType,
-      title.trim(),
-      date,
-      maxScore || 20.0,
-      coefficient || 1.0,
-      req.user!.id,
-    ]);
-
-    // Persistance synchronisée dans Cloud Firestore
+    // Persistance directe et unique dans Cloud Firestore
     const evalPayload = {
       id,
       establishment_id: req.user!.establishment_id,
@@ -4275,11 +4339,7 @@ api.post('/evaluations', authenticateToken, requireRole(['PROMOTEUR', 'DIRECTEUR
       created_by: req.user!.id,
       created_at: new Date().toISOString(),
     };
-    try {
-      await setEvaluation(req.user!.establishment_id, evalPayload);
-    } catch (fsErr) {
-      console.warn('Persistance Firestore évaluation asynchrone:', fsErr);
-    }
+    await setEvaluation(req.user!.establishment_id, evalPayload);
 
     logAudit(req.user!.establishment_id, req.user!.id, req.user!.full_name, 'CREATION_EVALUATION', 'EVALUATION', id, {
       title,
@@ -4353,8 +4413,14 @@ api.get('/evaluations/:id/grades', authenticateToken, async (req: AuthenticatedR
 api.post('/evaluations/:id/grades', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { grades } = req.body; // array of { studentId, score, isAbsent, remarks }
+    const estId = req.user!.establishment_id;
 
-    const evalItem = queryOne<any>('SELECT * FROM evaluations WHERE id = ? AND establishment_id = ?', [req.params.id, req.user!.establishment_id]);
+    const [allEvals, allGrades] = await Promise.all([
+      listEvaluations(estId),
+      listGrades(estId),
+    ]);
+
+    const evalItem = (allEvals || []).find((e: any) => e.id === req.params.id);
     if (!evalItem) return res.status(404).json({ error: 'Évaluation introuvable.' });
 
     if (evalItem.is_locked === 1 && req.user!.role !== 'DIRECTEUR_ETUDES') {
@@ -4370,42 +4436,23 @@ api.post('/evaluations/:id/grades', authenticateToken, async (req: Authenticated
       const isAbsent = g.isAbsent ? 1 : 0;
       const remarks = g.remarks || null;
 
-      const existingGrade = queryOne('SELECT id FROM grades WHERE evaluation_id = ? AND student_id = ?', [evalItem.id, g.studentId]);
-      let targetGradeId: string;
-      if (existingGrade) {
-        targetGradeId = existingGrade.id;
-        run(`
-          UPDATE grades
-          SET score = ?, is_absent = ?, remarks = ?, updated_by = ?, updated_at = datetime('now')
-          WHERE id = ?
-        `, [score, isAbsent, remarks, req.user!.id, targetGradeId]);
-      } else {
-        targetGradeId = `GRD-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 6)}`;
-        run(`
-          INSERT INTO grades (id, evaluation_id, student_id, score, is_absent, remarks, updated_by)
-          VALUES (?, ?, ?, ?, ?, ?, ?)
-        `, [targetGradeId, evalItem.id, g.studentId, score, isAbsent, remarks, req.user!.id]);
-      }
+      const existingGrade = (allGrades || []).find((gr: any) => gr.evaluation_id === evalItem.id && gr.student_id === g.studentId);
+      const targetGradeId = existingGrade?.id || `GRD-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 6)}`;
 
-      // Sync Firestore
-      try {
-        await setGrade(req.user!.establishment_id, {
-          id: targetGradeId,
-          establishment_id: req.user!.establishment_id,
-          evaluation_id: evalItem.id,
-          student_id: g.studentId,
-          score,
-          is_absent: isAbsent,
-          remarks,
-          updated_by: req.user!.id,
-          updated_at: new Date().toISOString(),
-        });
-      } catch (fsErr) {
-        // Log sync warning without interrupting batch
-      }
+      await setGrade(estId, {
+        id: targetGradeId,
+        establishment_id: estId,
+        evaluation_id: evalItem.id,
+        student_id: g.studentId,
+        score,
+        is_absent: isAbsent,
+        remarks,
+        updated_by: req.user!.id,
+        updated_at: new Date().toISOString(),
+      });
     }
 
-    logAudit(req.user!.establishment_id, req.user!.id, req.user!.full_name, 'SAISIE_NOTES', 'EVALUATION', evalItem.id, {
+    logAudit(estId, req.user!.id, req.user!.full_name, 'SAISIE_NOTES', 'EVALUATION', evalItem.id, {
       count: grades.length,
     });
 
@@ -4415,14 +4462,18 @@ api.post('/evaluations/:id/grades', authenticateToken, async (req: Authenticated
   }
 });
 
-api.post('/evaluations/:id/lock', authenticateToken, requireRole(['DIRECTEUR_ETUDES', 'PROMOTEUR', 'DIRECTEUR_GENERAL']), (req: AuthenticatedRequest, res: Response) => {
+api.post('/evaluations/:id/lock', authenticateToken, requireRole(['DIRECTEUR_ETUDES', 'PROMOTEUR', 'DIRECTEUR_GENERAL']), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { isLocked } = req.body;
     const lockVal = isLocked ? 1 : 0;
+    const estId = req.user!.establishment_id;
 
-    run('UPDATE evaluations SET is_locked = ? WHERE id = ? AND establishment_id = ?', [lockVal, req.params.id, req.user!.establishment_id]);
+    await updateDocData(`establishments/${estId}/evaluations`, req.params.id, {
+      is_locked: lockVal,
+      updated_at: new Date().toISOString()
+    });
 
-    logAudit(req.user!.establishment_id, req.user!.id, req.user!.full_name, lockVal ? 'VERROUILLAGE_EVALUATION' : 'DEVERROUILLAGE_EVALUATION', 'EVALUATION', req.params.id);
+    logAudit(estId, req.user!.id, req.user!.full_name, lockVal ? 'VERROUILLAGE_EVALUATION' : 'DEVERROUILLAGE_EVALUATION', 'EVALUATION', req.params.id);
 
     res.json({ message: `Évaluation ${lockVal ? 'verrouillée' : 'déverrouillée'} avec succès.` });
   } catch (error: any) {
@@ -4430,72 +4481,84 @@ api.post('/evaluations/:id/lock', authenticateToken, requireRole(['DIRECTEUR_ETU
   }
 });
 
-// Calcul officiel des bulletins de notes (avec moyennes, coefficients, rangs et décisions du conseil)
-api.get('/report-cards/class/:classId', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+// Calcul officiel des bulletins de notes (avec moyennes, coefficients, rangs et décisions du conseil - 100% Firestore)
+api.get('/report-cards/class/:classId', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { classId } = req.params;
     const term = (req.query.term as string) || 'TRIMESTRE_1';
+    const estId = req.user!.establishment_id;
 
-    const cls = queryOne(`
-      SELECT c.*, u.full_name as main_teacher_name
-      FROM classes c
-      LEFT JOIN users u ON c.main_teacher_id = u.id
-      WHERE c.id = ? AND c.establishment_id = ?
-    `, [classId, req.user!.establishment_id]);
+    const [allClasses, establishment, allStudents, allClassSubjects, allSubjects, allUsers, allEvals, allGrades] = await Promise.all([
+      listClasses(estId),
+      getEstablishment(estId),
+      listStudents(estId),
+      listClassSubjects(estId),
+      listSubjects(estId),
+      listTenantUsers(estId),
+      listEvaluations(estId),
+      listGrades(estId)
+    ]);
 
-    if (!cls) return res.status(404).json({ error: 'Classe introuvable.' });
+    const userMap = new Map((allUsers || []).map((u: any) => [u.id, u.full_name]));
+    const targetClass = (allClasses || []).find((c: any) => c.id === classId);
+    if (!targetClass) return res.status(404).json({ error: 'Classe introuvable.' });
 
-    const establishment = queryOne('SELECT * FROM establishments WHERE id = ?', [req.user!.establishment_id]);
+    const cls = {
+      ...targetClass,
+      main_teacher_name: targetClass.main_teacher_id ? userMap.get(targetClass.main_teacher_id) || null : null
+    };
 
     // Élèves de la classe
-    const students = queryAll(`
-      SELECT id, matricule, first_name, last_name, post_name, gender, birth_date
-      FROM students
-      WHERE class_id = ? AND status != 'ARCHIVE'
-      ORDER BY last_name ASC, first_name ASC
-    `, [classId]);
+    const students = (allStudents || [])
+      .filter((s: any) => s.class_id === classId && s.status !== 'ARCHIVE' && s.status !== 'ARCHIVED')
+      .sort((a: any, b: any) => (a.last_name || '').localeCompare(b.last_name || '') || (a.first_name || '').localeCompare(b.first_name || ''));
 
     // Matières et coefficients de la classe
-    const subjects = queryAll(`
-      SELECT cs.id, cs.coefficient, cs.weekly_hours,
-             s.id as subject_id, s.name as subject_name, s.code as subject_code,
-             u.full_name as teacher_name
-      FROM class_subjects cs
-      JOIN subjects s ON cs.subject_id = s.id
-      LEFT JOIN users u ON cs.teacher_id = u.id
-      WHERE cs.class_id = ?
-      ORDER BY s.name ASC
-    `, [classId]);
+    const subjectMap = new Map((allSubjects || []).map((s: any) => [s.id, s]));
+    const subjects = (allClassSubjects || [])
+      .filter((cs: any) => cs.class_id === classId)
+      .map((cs: any) => {
+        const s = subjectMap.get(cs.subject_id) || {};
+        return {
+          id: cs.id,
+          coefficient: cs.coefficient !== undefined ? Number(cs.coefficient) : 1,
+          weekly_hours: cs.weekly_hours !== undefined ? Number(cs.weekly_hours) : 2,
+          subject_id: cs.subject_id,
+          subject_name: s.name || cs.subject_name || 'Matière',
+          subject_code: s.code || cs.subject_code || '',
+          teacher_name: cs.teacher_id ? userMap.get(cs.teacher_id) || null : null
+        };
+      })
+      .sort((a: any, b: any) => (a.subject_name || '').localeCompare(b.subject_name || ''));
 
-    // Récupérer toutes les évaluations du trimestre pour cette classe
-    const evaluations = queryAll(`
-      SELECT id, subject_id, eval_type, max_score, coefficient, is_locked
-      FROM evaluations
-      WHERE class_id = ? AND term = ?
-    `, [classId, term]);
+    // Évaluations du trimestre pour cette classe
+    const evaluations = (allEvals || []).filter((e: any) => e.class_id === classId && e.term === term);
 
-    // Calculer les notes pour chaque élève
+    // Map des notes pour accès direct rapide
+    const gradeMap = new Map<string, any>();
+    (allGrades || []).forEach((g: any) => {
+      gradeMap.set(`${g.evaluation_id}_${g.student_id}`, g);
+    });
+
     const studentReports: any[] = [];
-
     for (const student of students) {
       const subjectGrades: any[] = [];
       let totalWeightedScore = 0;
       let totalCoefficients = 0;
 
       for (const subj of subjects) {
-        // Évaluations de cette matière
-        const subjEvals = evaluations.filter((e) => e.subject_id === subj.subject_id);
-        
+        const subjEvals = evaluations.filter((e: any) => e.subject_id === subj.subject_id);
         let subjTotal = 0;
         let subjEvalWeightSum = 0;
 
         for (const ev of subjEvals) {
-          const g = queryOne<any>('SELECT score, is_absent FROM grades WHERE evaluation_id = ? AND student_id = ?', [ev.id, student.id]);
-          if (g && !g.is_absent && g.score !== null) {
-            // Normaliser sur 20
-            const normalizedScore = (g.score / ev.max_score) * 20;
-            subjTotal += normalizedScore * ev.coefficient;
-            subjEvalWeightSum += ev.coefficient;
+          const g = gradeMap.get(`${ev.id}_${student.id}`);
+          if (g && !g.is_absent && g.score !== null && g.score !== undefined) {
+            const maxScore = ev.max_score || 20;
+            const evalCoeff = ev.coefficient || 1;
+            const normalizedScore = (Number(g.score) / maxScore) * 20;
+            subjTotal += normalizedScore * evalCoeff;
+            subjEvalWeightSum += evalCoeff;
           }
         }
 
@@ -4521,7 +4584,6 @@ api.get('/report-cards/class/:classId', authenticateToken, (req: AuthenticatedRe
 
       const generalAverage = totalCoefficients > 0 ? Number((totalWeightedScore / totalCoefficients).toFixed(2)) : null;
 
-      // Appréciation automatique du conseil
       let appreciation = 'Travail insuffisant';
       if (generalAverage !== null) {
         if (generalAverage >= 16) appreciation = 'Excellent travail - Félicitations du conseil';
@@ -4539,11 +4601,10 @@ api.get('/report-cards/class/:classId', authenticateToken, (req: AuthenticatedRe
         totalCoefficients,
         generalAverage,
         appreciation,
-        rank: 0, // sera calculé après le tri
+        rank: 0,
       });
     }
 
-    // Calcul des rangs
     const sorted = [...studentReports].sort((a, b) => (b.generalAverage || 0) - (a.generalAverage || 0));
     sorted.forEach((item, idx) => {
       item.rank = item.generalAverage !== null ? idx + 1 : '-';
@@ -4699,6 +4760,9 @@ api.post('/attendance', authenticateToken, requireRole(['SURVEILLANT', 'DIRECTEU
       return res.status(400).json({ error: 'Données d’appel invalides.' });
     }
 
+    const existingAttendances = await listStudentAttendances(req.user!.establishment_id).catch(() => []);
+    const attMap = new Map((existingAttendances || []).filter((a: any) => a.date === date).map((a: any) => [a.student_id, a]));
+
     for (const r of records) {
       const studentId = r.studentId || r.student_id;
       if (!studentId) continue;
@@ -4709,21 +4773,9 @@ api.post('/attendance', authenticateToken, requireRole(['SURVEILLANT', 'DIRECTEU
       const isJustified = (r.isJustified !== undefined ? r.isJustified : r.is_justified) ? 1 : 0;
       const justificationReason = r.justificationReason !== undefined ? r.justificationReason : (r.justification_reason || null);
 
-      let existing = null;
-      try {
-        existing = queryOne<any>('SELECT id FROM student_attendances WHERE student_id = ? AND date = ?', [studentId, date]);
-      } catch {}
-
-      let targetId: string;
-      let op: 'CREATE' | 'UPDATE';
-
-      if (existing) {
-        targetId = existing.id;
-        op = 'UPDATE';
-      } else {
-        targetId = `ATT-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 6)}`;
-        op = 'CREATE';
-      }
+      const existing = attMap.get(studentId);
+      const targetId = existing?.id || `ATT-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 6)}`;
+      const op = existing ? 'UPDATE' : 'CREATE';
 
       const attPayload = {
         id: targetId,
@@ -4746,20 +4798,7 @@ api.post('/attendance', authenticateToken, requireRole(['SURVEILLANT', 'DIRECTEU
         docId: targetId,
         operation: op,
         payload: attPayload,
-        sqliteWriter: () => {
-          if (op === 'UPDATE') {
-            run(`
-              UPDATE student_attendances
-              SET status = ?, actual_arrival_time = ?, actual_departure_time = ?, is_justified = ?, justification_reason = ?, recorded_by = ?
-              WHERE id = ?
-            `, [status, actualArr, actualDep, isJustified, justificationReason, req.user!.id, targetId]);
-          } else {
-            run(`
-              INSERT OR REPLACE INTO student_attendances (id, establishment_id, student_id, class_id, date, status, actual_arrival_time, actual_departure_time, is_justified, justification_reason, recorded_by)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            `, [targetId, req.user!.establishment_id, studentId, classId, date, status, actualArr, actualDep, isJustified, justificationReason, req.user!.id]);
-          }
-        }
+        sqliteWriter: () => {}
       });
     }
 
@@ -5099,32 +5138,7 @@ api.post('/discipline', authenticateToken, requireRole(['SURVEILLANT', 'DIRECTEU
       docId: id,
       operation: 'CREATE',
       payload,
-      sqliteWriter: () => {
-        run(`
-          INSERT INTO disciplinary_incidents (
-            id, establishment_id, student_id, date, time, incident_type,
-            motif, description, supporting_doc, sanction, recorded_by,
-            justification_status, observation, action_taken, assigned_to, status
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `, [
-          id,
-          req.user!.establishment_id,
-          studentId,
-          date,
-          time || null,
-          incidentType,
-          motif || null,
-          description,
-          supportingDoc || null,
-          sanction || null,
-          req.user!.id,
-          justificationStatus || 'NON_JUSTIFIE',
-          observation || null,
-          actionTaken || null,
-          assignedTo || null,
-          status || 'SIGNOLE',
-        ]);
-      }
+      sqliteWriter: () => {}
     });
 
     logAudit(req.user!.establishment_id, req.user!.id, req.user!.full_name, 'SIGNALEMENT_DISCIPLINAIRE', 'INCIDENT', id, {
@@ -5168,31 +5182,7 @@ api.put('/discipline/:id', authenticateToken, requireRole(['SURVEILLANT', 'DIREC
         motif,
         supporting_doc: supportingDoc,
       },
-      sqliteWriter: () => {
-        run(`
-          UPDATE disciplinary_incidents
-          SET sanction = COALESCE(?, sanction),
-              action_taken = COALESCE(?, action_taken),
-              assigned_to = COALESCE(?, assigned_to),
-              status = COALESCE(?, status),
-              justification_status = COALESCE(?, justification_status),
-              observation = COALESCE(?, observation),
-              motif = COALESCE(?, motif),
-              supporting_doc = COALESCE(?, supporting_doc)
-          WHERE id = ? AND establishment_id = ?
-        `, [
-          sanction !== undefined ? sanction : null,
-          actionTaken !== undefined ? actionTaken : null,
-          assignedTo !== undefined ? assignedTo : null,
-          status !== undefined ? status : null,
-          justificationStatus !== undefined ? justificationStatus : null,
-          observation !== undefined ? observation : null,
-          motif !== undefined ? motif : null,
-          supportingDoc !== undefined ? supportingDoc : null,
-          req.params.id,
-          req.user!.establishment_id,
-        ]);
-      }
+      sqliteWriter: () => {}
     });
 
     logAudit(req.user!.establishment_id, req.user!.id, req.user!.full_name, 'MODIFICATION_DISCIPLINE', 'INCIDENT', req.params.id, {
@@ -5308,37 +5298,7 @@ api.post('/tariffs', authenticateToken, requireRole(['PROMOTEUR', 'DIRECTEUR_GEN
       docId: id,
       operation: 'CREATE',
       payload,
-      sqliteWriter: () => {
-        run(`
-          INSERT INTO school_tariff_plans (
-            id, establishment_id, academic_year, cycle_code, level_code, class_id,
-            inscription_new_fee, reinscription_fee, monthly_tuition, months_count,
-            payment_schedule, trimester_1_fee, trimester_2_fee, trimester_3_fee,
-            annex_fees, annex_fees_details, annual_total_new, annual_total_old, is_active, updated_by, created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-        `, [
-          id,
-          req.user!.establishment_id,
-          year,
-          cycleCode,
-          levelCode || null,
-          classId || null,
-          inscNew,
-          reinsc,
-          monthly,
-          months,
-          paymentSchedule || 'MENSUEL',
-          Number(trimester1Fee || 0),
-          Number(trimester2Fee || 0),
-          Number(trimester3Fee || 0),
-          annex,
-          annexFeesDetails || null,
-          totalNew,
-          totalOld,
-          1,
-          req.user!.id,
-        ]);
-      }
+      sqliteWriter: () => {}
     });
 
     logAudit(req.user!.establishment_id, req.user!.id, req.user!.full_name, 'CONFIGURATION_TARIF', 'TARIFF', id, {
@@ -5356,7 +5316,8 @@ api.post('/tariffs', authenticateToken, requireRole(['PROMOTEUR', 'DIRECTEUR_GEN
 
 api.put('/tariffs/:id', authenticateToken, requireRole(['PROMOTEUR', 'DIRECTEUR_GENERAL']), async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const existing = queryOne<any>('SELECT * FROM school_tariff_plans WHERE id = ? AND establishment_id = ?', [req.params.id, req.user!.establishment_id]);
+    const estId = req.user!.establishment_id;
+    const existing = await getDocData(`establishments/${estId}/school_tariff_plans`, req.params.id);
     const {
       inscriptionNewFee,
       reinscriptionFee,
@@ -5381,8 +5342,8 @@ api.put('/tariffs/:id', authenticateToken, requireRole(['PROMOTEUR', 'DIRECTEUR_
     const totalOld = reinsc + (monthly * months) + annex;
 
     const dualResult = await executeDualWrite({
-      establishmentId: req.user!.establishment_id,
-      collectionPath: `establishments/${req.user!.establishment_id}/school_tariff_plans`,
+      establishmentId: estId,
+      collectionPath: `establishments/${estId}/school_tariff_plans`,
       docId: req.params.id,
       operation: 'UPDATE',
       payload: {
@@ -5401,30 +5362,10 @@ api.put('/tariffs/:id', authenticateToken, requireRole(['PROMOTEUR', 'DIRECTEUR_
         is_active: isActive !== undefined ? (isActive ? 1 : 0) : existing?.is_active ?? 1,
         updated_by: req.user!.id,
       },
-      sqliteWriter: () => {
-        if (existing) {
-          run(`
-            UPDATE school_tariff_plans
-            SET inscription_new_fee = ?, reinscription_fee = ?, monthly_tuition = ?, months_count = ?,
-                payment_schedule = ?, trimester_1_fee = ?, trimester_2_fee = ?, trimester_3_fee = ?,
-                annex_fees = ?, annex_fees_details = ?, annual_total_new = ?, annual_total_old = ?,
-                is_active = ?, updated_by = ?, updated_at = datetime('now')
-            WHERE id = ? AND establishment_id = ?
-          `, [
-            inscNew, reinsc, monthly, months,
-            paymentSchedule || existing.payment_schedule,
-            Number(trimester1Fee !== undefined ? trimester1Fee : existing.trimester_1_fee),
-            Number(trimester2Fee !== undefined ? trimester2Fee : existing.trimester_2_fee),
-            Number(trimester3Fee !== undefined ? trimester3Fee : existing.trimester_3_fee),
-            annex, annexFeesDetails !== undefined ? annexFeesDetails : existing.annex_fees_details,
-            totalNew, totalOld, isActive !== undefined ? (isActive ? 1 : 0) : existing.is_active,
-            req.user!.id, req.params.id, req.user!.establishment_id,
-          ]);
-        }
-      }
+      sqliteWriter: () => {}
     });
 
-    logAudit(req.user!.establishment_id, req.user!.id, req.user!.full_name, 'MODIFICATION_TARIF', 'TARIFF', req.params.id, {
+    logAudit(estId, req.user!.id, req.user!.full_name, 'MODIFICATION_TARIF', 'TARIFF', req.params.id, {
       annualTotalNew: totalNew,
       syncStatus: dualResult.syncStatus,
     });
@@ -5442,9 +5383,7 @@ api.delete('/tariffs/:id', authenticateToken, requireRole(['PROMOTEUR', 'DIRECTE
       collectionPath: `establishments/${req.user!.establishment_id}/school_tariff_plans`,
       docId: req.params.id,
       operation: 'DELETE',
-      sqliteWriter: () => {
-        run('DELETE FROM school_tariff_plans WHERE id = ? AND establishment_id = ?', [req.params.id, req.user!.establishment_id]);
-      }
+      sqliteWriter: () => {}
     });
 
     res.json({ message: 'Grille tarifaire supprimée.', syncStatus: dualResult.syncStatus });
@@ -7258,35 +7197,6 @@ api.post('/finance/payroll', authenticateToken, requireRole(['COMPTABLE', 'PROMO
       docId: id,
       operation: 'CREATE',
       payload: payrollPayload,
-      sqliteWriter: () => {
-        run(`
-          INSERT INTO payroll_records (
-            id, establishment_id, user_id, employee_code, full_name, job_title, department,
-            contract_type, hire_date, period, base_salary, bonuses, overtime_hours, overtime_amount,
-            advances, deductions, gross_amount, net_amount, status, notes
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'BROUILLON', ?)
-        `, [
-          id,
-          req.user!.establishment_id,
-          userId || null,
-          employeeCode.trim().toUpperCase(),
-          fullName.trim(),
-          jobTitle.trim(),
-          department,
-          contractType || 'CDI',
-          hireDate || null,
-          period,
-          base,
-          bon,
-          Number(overtimeHours || 0),
-          otAmount,
-          adv,
-          ded,
-          gross,
-          net,
-          notes || null,
-        ]);
-      }
     });
 
     logAudit(req.user!.establishment_id, req.user!.id, req.user!.full_name, 'CREATION_FICHE_PAIE', 'PAYROLL', id, {
@@ -7304,7 +7214,7 @@ api.post('/finance/payroll', authenticateToken, requireRole(['COMPTABLE', 'PROMO
 
 api.put('/finance/payroll/:id', authenticateToken, requireRole(['COMPTABLE', 'PROMOTEUR', 'DIRECTEUR_GENERAL']), async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const existing = queryOne<any>('SELECT * FROM payroll_records WHERE id = ? AND establishment_id = ?', [req.params.id, req.user!.establishment_id]);
+    const existing = await getDocData<any>(`establishments/${req.user!.establishment_id}/payroll_records`, req.params.id);
     if (!existing) return res.status(404).json({ error: 'Fiche de paie introuvable.' });
 
     if (existing.status === 'PAYE') {
@@ -7352,29 +7262,6 @@ api.put('/finance/payroll/:id', authenticateToken, requireRole(['COMPTABLE', 'PR
         department: department || existing.department,
         notes: notes !== undefined ? notes : existing.notes,
       },
-      sqliteWriter: () => {
-        run(`
-          UPDATE payroll_records
-          SET base_salary = ?, bonuses = ?, overtime_hours = ?, overtime_amount = ?,
-              advances = ?, deductions = ?, gross_amount = ?, net_amount = ?,
-              contract_type = ?, job_title = ?, department = ?, notes = ?
-          WHERE id = ?
-        `, [
-          base,
-          bon,
-          overtimeHours !== undefined ? Number(overtimeHours) : existing.overtime_hours,
-          otAmount,
-          adv,
-          ded,
-          gross,
-          net,
-          contractType || existing.contract_type,
-          jobTitle || existing.job_title,
-          department || existing.department,
-          notes !== undefined ? notes : existing.notes,
-          req.params.id,
-        ]);
-      }
     });
 
     res.json({ message: 'Fiche de paie mise à jour.', syncStatus: dualResult.syncStatus });
@@ -7383,25 +7270,27 @@ api.put('/finance/payroll/:id', authenticateToken, requireRole(['COMPTABLE', 'PR
   }
 });
 
-api.post('/finance/payroll/:id/submit', authenticateToken, requireRole(['COMPTABLE', 'DIRECTEUR_GENERAL', 'PROMOTEUR']), (req: AuthenticatedRequest, res: Response) => {
+api.post('/finance/payroll/:id/submit', authenticateToken, requireRole(['COMPTABLE', 'DIRECTEUR_GENERAL', 'PROMOTEUR']), async (req: AuthenticatedRequest, res: Response) => {
   try {
-    run(
-      "UPDATE payroll_records SET status = 'EN_ATTENTE_VALIDATION' WHERE id = ? AND establishment_id = ?",
-      [req.params.id, req.user!.establishment_id]
-    );
+    await updateDocData(`establishments/${req.user!.establishment_id}/payroll_records`, req.params.id, {
+      status: 'EN_ATTENTE_VALIDATION',
+      updated_at: new Date().toISOString(),
+    });
     res.json({ message: 'Bulletin soumis à la direction pour validation.' });
   } catch (error: any) {
     res.status(500).json({ error: 'Erreur lors de la soumission.' });
   }
 });
 
-api.post('/finance/payroll/:id/validate', authenticateToken, requireRole(['PROMOTEUR', 'DIRECTEUR_GENERAL']), (req: AuthenticatedRequest, res: Response) => {
+api.post('/finance/payroll/:id/validate', authenticateToken, requireRole(['PROMOTEUR', 'DIRECTEUR_GENERAL']), async (req: AuthenticatedRequest, res: Response) => {
   try {
-    run(`
-      UPDATE payroll_records
-      SET status = 'VALIDE', validated_by = ?, validated_at = datetime('now')
-      WHERE id = ? AND establishment_id = ?
-    `, [req.user!.full_name, req.params.id, req.user!.establishment_id]);
+    const nowIso = new Date().toISOString();
+    await updateDocData(`establishments/${req.user!.establishment_id}/payroll_records`, req.params.id, {
+      status: 'VALIDE',
+      validated_by: req.user!.full_name,
+      validated_at: nowIso,
+      updated_at: nowIso,
+    });
 
     logAudit(req.user!.establishment_id, req.user!.id, req.user!.full_name, 'VALIDATION_PAIE', 'PAYROLL', req.params.id);
     res.json({ message: 'Bulletin de paie officiellement validé.' });
@@ -7425,14 +7314,8 @@ api.post('/finance/payroll/:id/pay', authenticateToken, requireRole(['COMPTABLE'
         payment_date: date,
         payment_method: paymentMethod || 'ESPECES',
         transaction_ref: transactionRef || null,
+        updated_at: new Date().toISOString(),
       },
-      sqliteWriter: () => {
-        run(`
-          UPDATE payroll_records
-          SET status = 'PAYE', payment_date = ?, payment_method = ?, transaction_ref = ?
-          WHERE id = ? AND establishment_id = ?
-        `, [date, paymentMethod || 'ESPECES', transactionRef || null, req.params.id, req.user!.establishment_id]);
-      }
     });
 
     logAudit(req.user!.establishment_id, req.user!.id, req.user!.full_name, 'DECAISSEMENT_SALAIRE', 'PAYROLL', req.params.id, {
@@ -7447,15 +7330,15 @@ api.post('/finance/payroll/:id/pay', authenticateToken, requireRole(['COMPTABLE'
   }
 });
 
-api.delete('/finance/payroll/:id', authenticateToken, requireRole(['COMPTABLE', 'PROMOTEUR']), (req: AuthenticatedRequest, res: Response) => {
+api.delete('/finance/payroll/:id', authenticateToken, requireRole(['COMPTABLE', 'PROMOTEUR']), async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const rec = queryOne<any>('SELECT * FROM payroll_records WHERE id = ? AND establishment_id = ?', [req.params.id, req.user!.establishment_id]);
+    const rec = await getDocData<any>(`establishments/${req.user!.establishment_id}/payroll_records`, req.params.id);
     if (!rec) return res.status(404).json({ error: 'Fiche introuvable.' });
     if (rec.status === 'PAYE' || rec.status === 'VALIDE') {
       return res.status(400).json({ error: 'Impossible de supprimer une fiche de paie validée ou payée.' });
     }
 
-    run('DELETE FROM payroll_records WHERE id = ?', [req.params.id]);
+    await deleteDocData(`establishments/${req.user!.establishment_id}/payroll_records`, req.params.id);
     res.json({ message: 'Brouillon supprimé.' });
   } catch (error: any) {
     res.status(500).json({ error: 'Erreur lors de la suppression.' });
@@ -8179,14 +8062,6 @@ api.get('/curriculum-programs', authenticateToken, requireRole(['DIRECTEUR_ETUDE
       programs = [];
     }
 
-    if (!programs || programs.length === 0) {
-      try {
-        programs = queryAll<any>('SELECT * FROM curriculum_programs WHERE establishment_id = ? ORDER BY created_at DESC', [estId]);
-      } catch {
-        programs = [];
-      }
-    }
-
     let filtered = [...programs];
     if (subjectId && typeof subjectId === 'string' && subjectId !== 'ALL') {
       filtered = filtered.filter(p => p.subject_id === subjectId || p.subject_name === subjectId);
@@ -8303,42 +8178,8 @@ api.post('/curriculum-programs', authenticateToken, requireRole(['DIRECTEUR_ETUD
       updated_at: now,
     };
 
-    // Sauvegarde SQLite
-    try {
-      run(
-        `INSERT INTO curriculum_programs (
-          id, establishment_id, title, subject_id, subject_name, class_id, class_name,
-          academic_year, file_name, file_type, file_size, file_path, uploaded_by_id, uploaded_by_name, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          programRecord.id,
-          programRecord.establishment_id,
-          programRecord.title,
-          programRecord.subject_id,
-          programRecord.subject_name,
-          programRecord.class_id,
-          programRecord.class_name,
-          programRecord.academic_year,
-          programRecord.file_name,
-          programRecord.file_type,
-          programRecord.file_size,
-          programRecord.file_path,
-          programRecord.uploaded_by_id,
-          programRecord.uploaded_by_name,
-          programRecord.created_at,
-          programRecord.updated_at
-        ]
-      );
-    } catch (sqlErr) {
-      console.warn('Erreur insertion SQLite curriculum_programs:', sqlErr);
-    }
-
-    // Sauvegarde Firestore
-    try {
-      await setCurriculumProgram(estId, programId, programRecord);
-    } catch (fErr) {
-      console.warn('Erreur insertion Firestore curriculum_programs:', fErr);
-    }
+    // Sauvegarde Cloud Firestore
+    await setCurriculumProgram(estId, programId, programRecord);
 
     // Journal d'audit
     try {
@@ -8385,11 +8226,6 @@ api.put('/curriculum-programs/:id', authenticateToken, requireRole(['DIRECTEUR_E
     try {
       existing = await getCurriculumProgram(estId, id);
     } catch {}
-    if (!existing) {
-      try {
-        existing = queryOne<any>('SELECT * FROM curriculum_programs WHERE id = ? AND establishment_id = ?', [id, estId]);
-      } catch {}
-    }
     if (!existing) {
       return res.status(404).json({ error: 'Programme introuvable.' });
     }
@@ -8455,39 +8291,8 @@ api.put('/curriculum-programs/:id', authenticateToken, requireRole(['DIRECTEUR_E
       updated_at: now,
     };
 
-    // Mise à jour SQLite
-    try {
-      run(
-        `UPDATE curriculum_programs SET
-          title = ?, subject_id = ?, subject_name = ?, class_id = ?, class_name = ?,
-          academic_year = ?, file_name = ?, file_type = ?, file_size = ?, file_path = ?, updated_at = ?
-         WHERE id = ? AND establishment_id = ?`,
-        [
-          updatedRecord.title,
-          updatedRecord.subject_id,
-          updatedRecord.subject_name,
-          updatedRecord.class_id,
-          updatedRecord.class_name,
-          updatedRecord.academic_year,
-          updatedRecord.file_name,
-          updatedRecord.file_type,
-          updatedRecord.file_size,
-          updatedRecord.file_path,
-          updatedRecord.updated_at,
-          id,
-          estId
-        ]
-      );
-    } catch (sqlErr) {
-      console.warn('Erreur update SQLite curriculum_programs:', sqlErr);
-    }
-
-    // Mise à jour Firestore
-    try {
-      await setCurriculumProgram(estId, id, updatedRecord);
-    } catch (fErr) {
-      console.warn('Erreur update Firestore curriculum_programs:', fErr);
-    }
+    // Mise à jour Cloud Firestore
+    await setCurriculumProgram(estId, id, updatedRecord);
 
     // Journal d'audit
     try {
@@ -8523,11 +8328,6 @@ api.delete('/curriculum-programs/:id', authenticateToken, requireRole(['DIRECTEU
       existing = await getCurriculumProgram(estId, id);
     } catch {}
     if (!existing) {
-      try {
-        existing = queryOne<any>('SELECT * FROM curriculum_programs WHERE id = ? AND establishment_id = ?', [id, estId]);
-      } catch {}
-    }
-    if (!existing) {
       return res.status(404).json({ error: 'Programme introuvable.' });
     }
 
@@ -8539,19 +8339,8 @@ api.delete('/curriculum-programs/:id', authenticateToken, requireRole(['DIRECTEU
       }
     }
 
-    // Suppression SQLite
-    try {
-      run('DELETE FROM curriculum_programs WHERE id = ? AND establishment_id = ?', [id, estId]);
-    } catch (sqlErr) {
-      console.warn('Erreur delete SQLite curriculum_programs:', sqlErr);
-    }
-
-    // Suppression Firestore
-    try {
-      await deleteCurriculumProgramDoc(estId, id);
-    } catch (fErr) {
-      console.warn('Erreur delete Firestore curriculum_programs:', fErr);
-    }
+    // Suppression Cloud Firestore
+    await deleteCurriculumProgramDoc(estId, id);
 
     // Journal d'audit
     try {
@@ -8597,11 +8386,6 @@ api.get('/curriculum-programs/:id/file', async (req: Request, res: Response) => 
     try {
       program = await getCurriculumProgram(estId, id);
     } catch {}
-    if (!program) {
-      try {
-        program = queryOne<any>('SELECT * FROM curriculum_programs WHERE id = ? AND establishment_id = ?', [id, estId]);
-      } catch {}
-    }
 
     if (!program) {
       return res.status(404).json({ error: 'Fichier du programme introuvable.' });
@@ -8644,11 +8428,6 @@ api.get('/curriculum-programs/:id/download', async (req: Request, res: Response)
     try {
       program = await getCurriculumProgram(estId, id);
     } catch {}
-    if (!program) {
-      try {
-        program = queryOne<any>('SELECT * FROM curriculum_programs WHERE id = ? AND establishment_id = ?', [id, estId]);
-      } catch {}
-    }
 
     if (!program || !program.file_path || !fs.existsSync(program.file_path)) {
       return res.status(404).json({ error: 'Fichier introuvable dans le stockage.' });
@@ -8695,30 +8474,33 @@ api.get('/exam-dossiers/config', authenticateToken, requireRole(['DIRECTEUR_ETUD
       return res.status(400).json({ error: 'Type d examen invalide. Utilisez BEPC ou BAC.' });
     }
 
-    let config = queryOne<any>(
-      'SELECT * FROM exam_configurations WHERE establishment_id = ? AND academic_year = ? AND exam_type = ?',
-      [estId, academicYear, examType]
-    );
+    const configId = `EXAM-CFG-${estId}-${academicYear}-${examType}`;
+    let config = await getSubcollectionDoc<any>(estId, 'exam_configurations', configId).catch(() => null);
 
     if (!config) {
       // Auto-création de la configuration par défaut (champ deadline vide au départ selon les spécifications)
       const defaultDocs = examType === 'BEPC' ? DEFAULT_BEPC_DOCS : DEFAULT_BAC_DOCS;
       const defaultDeadline = null;
       const examName = examType === 'BEPC' ? 'BEPC — Brevet d Études du Premier Cycle' : 'BAC — Baccalauréat National';
-      const id = `EXAM-CFG-${estId}-${academicYear}-${examType}`;
 
-      run(
-        `INSERT INTO exam_configurations (id, establishment_id, academic_year, exam_type, exam_name, deadline, required_documents)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [id, estId, academicYear, examType, examName, defaultDeadline, JSON.stringify(defaultDocs)]
-      );
+      config = {
+        id: configId,
+        establishment_id: estId,
+        academic_year: academicYear,
+        exam_type: examType,
+        exam_name: examName,
+        deadline: defaultDeadline,
+        required_documents: JSON.stringify(defaultDocs),
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
 
-      config = queryOne<any>('SELECT * FROM exam_configurations WHERE id = ?', [id]);
+      await setDocData(`establishments/${estId}/exam_configurations`, configId, config);
     }
 
     let parsedDocs = [];
     try {
-      parsedDocs = JSON.parse(config.required_documents || '[]');
+      parsedDocs = typeof config.required_documents === 'string' ? JSON.parse(config.required_documents || '[]') : config.required_documents;
     } catch {
       parsedDocs = examType === 'BEPC' ? DEFAULT_BEPC_DOCS : DEFAULT_BAC_DOCS;
     }
@@ -8754,44 +8536,43 @@ api.put('/exam-dossiers/config', authenticateToken, requireRole(['DIRECTEUR_ETUD
     const name = exam_name || (normExamType === 'BEPC' ? 'BEPC — Brevet d Études du Premier Cycle' : 'BAC — Baccalauréat National');
     const effectiveDeadline = deadline && String(deadline).trim().length > 0 ? String(deadline).trim() : null;
 
-    const serializedDocs = JSON.stringify(required_documents);
+    const configPayload = {
+      id: configId,
+      establishment_id: estId,
+      academic_year: normYear,
+      exam_type: normExamType,
+      exam_name: name,
+      deadline: effectiveDeadline,
+      required_documents: JSON.stringify(required_documents),
+      updated_at: new Date().toISOString(),
+    };
 
-    run(
-      `INSERT INTO exam_configurations (id, establishment_id, academic_year, exam_type, exam_name, deadline, required_documents, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-       ON CONFLICT(establishment_id, academic_year, exam_type) DO UPDATE SET
-         exam_name = excluded.exam_name,
-         deadline = excluded.deadline,
-         required_documents = excluded.required_documents,
-         updated_at = CURRENT_TIMESTAMP`,
-      [configId, estId, normYear, normExamType, name, effectiveDeadline, serializedDocs]
-    );
+    await setDocData(`establishments/${estId}/exam_configurations`, configId, configPayload);
 
-    // Mettre à jour le nombre total de documents attendus sur tous les candidats existants
+    // Mettre à jour le nombre total de documents attendus sur tous les candidats existants dans Firestore
     const totalCount = required_documents.length;
-    const candidates = queryAll<any>(
-      'SELECT id, checklist FROM exam_candidates WHERE establishment_id = ? AND academic_year = ? AND exam_type = ?',
-      [estId, normYear, normExamType]
-    );
-
+    const allCandidates = await listTenantDocs<any>(estId, 'exam_candidates').catch(() => []);
+    const matchingCandidates = (allCandidates || []).filter((c: any) => c.academic_year === normYear && c.exam_type === normExamType);
     const docIds = new Set(required_documents.map((d: any) => d.id));
 
-    for (const cand of candidates) {
+    for (const cand of matchingCandidates) {
       let checklist: Record<string, any> = {};
-      try { checklist = JSON.parse(cand.checklist || '{}'); } catch {}
+      try { checklist = typeof cand.checklist === 'string' ? JSON.parse(cand.checklist || '{}') : (cand.checklist || {}); } catch {}
 
       // Compter les documents reçus qui figurent encore dans la liste active
       let receivedCount = 0;
       docIds.forEach((dId) => {
-        if (checklist[dId] && checklist[dId].received) receivedCount++;
+        if (checklist[dId] && (checklist[dId].received || checklist[dId].is_checked)) receivedCount++;
       });
 
       const newStatus = (receivedCount >= totalCount && totalCount > 0) ? 'COMPLET' : 'INCOMPLET';
 
-      run(
-        `UPDATE exam_candidates SET documents_total_count = ?, documents_received_count = ?, status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-        [totalCount, receivedCount, newStatus, cand.id]
-      );
+      await updateDocData(`establishments/${estId}/exam_candidates`, cand.id, {
+        documents_total_count: totalCount,
+        documents_received_count: receivedCount,
+        status: newStatus,
+        updated_at: new Date().toISOString(),
+      });
     }
 
     logAudit(estId, req.user!.id, req.user!.full_name, 'CONFIG_DOSSIERS_EXAMEN', 'EXAM_CONFIG', configId, {
@@ -8800,19 +8581,9 @@ api.put('/exam-dossiers/config', authenticateToken, requireRole(['DIRECTEUR_ETUD
       docsCount: totalCount,
     });
 
-    const updatedConfig = queryOne<any>('SELECT * FROM exam_configurations WHERE id = ?', [configId]);
-
     res.json({
       message: 'Configuration des documents mise à jour avec succès.',
-      config: updatedConfig ? { ...updatedConfig, required_documents } : {
-        id: configId,
-        establishment_id: estId,
-        academic_year: normYear,
-        exam_type: normExamType,
-        exam_name: name,
-        deadline: effectiveDeadline,
-        required_documents,
-      },
+      config: { ...configPayload, required_documents },
       deadline: effectiveDeadline,
       required_documents,
     });
@@ -8833,10 +8604,8 @@ api.get('/exam-dossiers/candidates', authenticateToken, requireRole(['DIRECTEUR_
     const search = req.query.search as string;
 
     // 1. Récupérer la configuration pour connaître le nombre total de documents requis
-    let config = queryOne<any>(
-      'SELECT * FROM exam_configurations WHERE establishment_id = ? AND academic_year = ? AND exam_type = ?',
-      [estId, academicYear, examType]
-    );
+    const configId = `EXAM-CFG-${estId}-${academicYear}-${examType}`;
+    let config = await getSubcollectionDoc<any>(estId, 'exam_configurations', configId).catch(() => null);
 
     if (!config) {
       try {
@@ -8856,36 +8625,26 @@ api.get('/exam-dossiers/candidates', authenticateToken, requireRole(['DIRECTEUR_
     }
     const totalDocsCount = requiredDocs.length;
 
-    // 2. Charger les élèves et les classes depuis Firestore et SQLite (hybride ultra-fiable)
+    // 2. Charger les élèves et les classes depuis Firestore
     const [fsStudents, fsClasses, fsCandidates] = await Promise.all([
       listStudents(estId).catch(() => []),
       listClasses(estId).catch(() => []),
       listTenantDocs<any>(estId, 'exam_candidates').catch(() => []),
     ]);
 
-    let sqlStudents: any[] = [];
-    try {
-      sqlStudents = queryAll<any>(`
-        SELECT s.*, c.name as class_name, c.level_code as class_level, c.serie_code as class_serie
-        FROM students s
-        LEFT JOIN classes c ON s.class_id = c.id
-        WHERE s.establishment_id = ? AND s.status != 'ARCHIVE'
-      `, [estId]);
-    } catch {}
-
     const classMap = new Map<string, any>();
     (fsClasses || []).forEach((c: any) => { if (c && c.id) classMap.set(c.id, c); });
 
-    // Fusionner la liste des élèves (Firestore prioritaire)
+    // Fusionner la liste des élèves (100% Firestore)
     const studentMap = new Map<string, any>();
-    [...sqlStudents, ...(fsStudents || [])].forEach((s: any) => {
+    (fsStudents || []).forEach((s: any) => {
       if (s && s.id && s.status !== 'ARCHIVE' && s.status !== 'ARCHIVED') {
         const cls = classMap.get(s.class_id) || {};
         studentMap.set(s.id, {
           ...s,
           class_name: cls.name || s.class_name || null,
-          level_code: cls.level_code || s.level_code || s.class_level || null,
-          serie_code: cls.serie_code || s.serie_code || s.class_serie || null,
+          level_code: cls.level_code || s.level_code || null,
+          serie_code: cls.serie_code || s.serie_code || null,
           cycle_code: cls.cycle_code || s.cycle_code || null,
         });
       }
@@ -8907,17 +8666,9 @@ api.get('/exam-dossiers/candidates', authenticateToken, requireRole(['DIRECTEUR_
       }
     });
 
-    // 3. Fusionner avec les fiches candidates enregistrées (Firestore & SQLite)
-    let sqlCandidates: any[] = [];
-    try {
-      sqlCandidates = queryAll<any>(
-        'SELECT * FROM exam_candidates WHERE establishment_id = ? AND academic_year = ? AND exam_type = ?',
-        [estId, academicYear, examType]
-      );
-    } catch {}
-
+    // 3. Fusionner avec les fiches candidates enregistrées (Firestore)
     const savedCandMap = new Map<string, any>();
-    [...sqlCandidates, ...(fsCandidates || [])].forEach((c: any) => {
+    (fsCandidates || []).forEach((c: any) => {
       if (c && (c.student_id || c.id)) {
         const key = c.student_id || c.id.replace(`CAND-${estId}-${academicYear}-${examType}-`, '');
         savedCandMap.set(key, c);
@@ -9036,32 +8787,21 @@ api.post('/exam-dossiers/candidates/toggle-retained', authenticateToken, require
     const val = isRetained ? 1 : 0;
     const effCandId = candidateId || `CAND-${estId}-${academicYear || '2025-2026'}-${examType || 'BEPC'}-${studentId}`;
 
-    // Écriture SQLite
-    try {
-      run('UPDATE exam_candidates SET is_retained = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND establishment_id = ?', [val, effCandId, estId]);
-    } catch {}
-
-    // Écriture Firestore
-    try {
-      const existing = await getSubcollectionDoc<any>(estId, 'exam_candidates', effCandId);
-      const extractedStuId = effCandId.includes('-STU-') ? 'STU-' + effCandId.split('-STU-')[1] : '';
-      const resolvedStudentId = studentId || existing?.student_id || extractedStuId || '';
-      
-      const updated = {
-        ...(existing || {}),
-        id: effCandId,
-        establishment_id: estId,
-        student_id: resolvedStudentId,
-        exam_type: examType || existing?.exam_type || 'BEPC',
-        academic_year: academicYear || existing?.academic_year || '2025-2026',
-        is_retained: val,
-        updated_at: new Date().toISOString(),
-      };
-      await setDocData(`establishments/${estId}/exam_candidates`, effCandId, updated);
-      await setDocData('exam_candidates', effCandId, updated);
-    } catch (fErr) {
-      console.warn('Erreur toggle-retained Firestore:', fErr);
-    }
+    const existing = await getSubcollectionDoc<any>(estId, 'exam_candidates', effCandId).catch(() => null);
+    const extractedStuId = effCandId.includes('-STU-') ? 'STU-' + effCandId.split('-STU-')[1] : '';
+    const resolvedStudentId = studentId || existing?.student_id || extractedStuId || '';
+    
+    const updated = {
+      ...(existing || {}),
+      id: effCandId,
+      establishment_id: estId,
+      student_id: resolvedStudentId,
+      exam_type: examType || existing?.exam_type || 'BEPC',
+      academic_year: academicYear || existing?.academic_year || '2025-2026',
+      is_retained: val,
+      updated_at: new Date().toISOString(),
+    };
+    await setDocData(`establishments/${estId}/exam_candidates`, effCandId, updated);
 
     res.json({ success: true, candidateId: effCandId, isRetained: Boolean(val) });
   } catch (error: any) {
@@ -9079,18 +8819,21 @@ api.post('/exam-dossiers/candidates/toggle-all-retained', authenticateToken, req
     const effExamType = examType || 'BEPC';
     const effYear = academicYear || '2025-2026';
 
-    // Mettre à jour en masse SQLite
-    let sql = 'UPDATE exam_candidates SET is_retained = ?, updated_at = CURRENT_TIMESTAMP WHERE establishment_id = ? AND academic_year = ? AND exam_type = ?';
-    const params: any[] = [val, estId, effYear, effExamType];
+    const allCandidates = await listTenantDocs<any>(estId, 'exam_candidates').catch(() => []);
+    let filtered = (allCandidates || []).filter((c: any) => c.academic_year === effYear && c.exam_type === effExamType);
     if (serieCode && serieCode !== 'ALL' && serieCode !== 'TOUTES') {
-      sql += ' AND serie_code = ?';
-      params.push(serieCode);
+      filtered = filtered.filter((c: any) => c.serie_code === serieCode);
     }
-    try { run(sql, params); } catch {}
 
-    // Si une liste explicite de candidats/élèves est fournie, sauvegarder chacun dans Firestore
+    const batch = db.batch();
+    const nowIso = new Date().toISOString();
+
+    for (const cand of filtered) {
+      const ref = db.collection(`establishments/${estId}/exam_candidates`).doc(cand.id);
+      batch.update(ref, { is_retained: val, updated_at: nowIso });
+    }
+
     if (Array.isArray(candidatesList) && candidatesList.length > 0) {
-      const batch = db.batch();
       for (const cand of candidatesList) {
         const cId = cand.id || `CAND-${estId}-${effYear}-${effExamType}-${cand.student_id || cand.id}`;
         const ref = db.collection(`establishments/${estId}/exam_candidates`).doc(cId);
@@ -9106,11 +8849,12 @@ api.post('/exam-dossiers/candidates/toggle-all-retained', authenticateToken, req
           is_retained: val,
           checklist: JSON.stringify(cand.checklist || {}),
           status: cand.status || 'INCOMPLET',
-          updated_at: new Date().toISOString(),
+          updated_at: nowIso,
         }, { merge: true });
       }
-      try { await batch.commit(); } catch (bErr) { console.warn('Erreur batch toggle-all Firestore:', bErr); }
     }
+
+    await batch.commit();
 
     res.json({ success: true, isRetained: Boolean(val) });
   } catch (error: any) {
@@ -9131,27 +8875,13 @@ api.post('/exam-dossiers/candidates/:candidateId/check-doc', authenticateToken, 
 
     const isRec = received !== undefined ? Boolean(received) : Boolean(isChecked);
 
-    // Chercher le candidat dans SQLite ou Firestore
-    let candidate = queryOne<any>(
-      'SELECT * FROM exam_candidates WHERE id = ? AND establishment_id = ?',
-      [candidateId, estId]
-    );
-
-    if (!candidate) {
-      try {
-        candidate = await getSubcollectionDoc<any>(estId, 'exam_candidates', candidateId);
-      } catch {}
-    }
+    let candidate = await getSubcollectionDoc<any>(estId, 'exam_candidates', candidateId).catch(() => null);
 
     const year = candidate?.academic_year || '2025-2026';
     const eType = candidate?.exam_type || 'BEPC';
 
-    // Récupérer la configuration active pour connaître les documents valides
-    let config = queryOne<any>(
-      'SELECT required_documents FROM exam_configurations WHERE establishment_id = ? AND academic_year = ? AND exam_type = ?',
-      [estId, year, eType]
-    );
-
+    const configId = `EXAM-CFG-${estId}-${year}-${eType}`;
+    let config = await getSubcollectionDoc<any>(estId, 'exam_configurations', configId).catch(() => null);
     if (!config) {
       try {
         const fsCfgs = await listTenantDocs<any>(estId, 'exam_configurations');
@@ -9208,68 +8938,39 @@ api.post('/exam-dossiers/candidates/:candidateId/check-doc', authenticateToken, 
 
     const status = (receivedCount >= totalDocsCount && totalDocsCount > 0) ? 'COMPLET' : 'INCOMPLET';
 
-    // Sauvegarde SQLite
-    try {
-      run(
-        `INSERT INTO exam_candidates (id, establishment_id, academic_year, exam_type, student_id, class_id, serie_code, is_retained, checklist, status, documents_received_count, documents_total_count, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-         ON CONFLICT(id) DO UPDATE SET
-           checklist = excluded.checklist,
-           documents_received_count = excluded.documents_received_count,
-           documents_total_count = excluded.documents_total_count,
-           status = excluded.status,
-           updated_at = CURRENT_TIMESTAMP`,
-        [candidateId, estId, year, eType, candidate?.student_id || '', candidate?.class_id || '', candidate?.serie_code || null, JSON.stringify(checklist), status, receivedCount, totalDocsCount]
-      );
-    } catch (sqlErr) {
-      console.warn('Erreur SQLite check-doc:', sqlErr);
-    }
+    // Sauvegarde Cloud Firestore
+    const candPayload = {
+      id: candidateId,
+      establishment_id: estId,
+      academic_year: year,
+      exam_type: eType,
+      student_id: candidate?.student_id || (candidateId.includes('-STU-') ? 'STU-' + candidateId.split('-STU-')[1] : ''),
+      class_id: candidate?.class_id || '',
+      serie_code: candidate?.serie_code || null,
+      is_retained: candidate?.is_retained !== undefined ? candidate.is_retained : 1,
+      checklist: JSON.stringify(checklist),
+      status,
+      documents_received_count: receivedCount,
+      documents_total_count: totalDocsCount,
+      updated_at: now,
+    };
+    await setDocData(`establishments/${estId}/exam_candidates`, candidateId, candPayload);
 
-    // Sauvegarde Firestore
-    try {
-      const candPayload = {
-        id: candidateId,
-        establishment_id: estId,
-        academic_year: year,
-        exam_type: eType,
-        student_id: candidate?.student_id || (candidateId.includes('-STU-') ? 'STU-' + candidateId.split('-STU-')[1] : ''),
-        class_id: candidate?.class_id || '',
-        serie_code: candidate?.serie_code || null,
-        is_retained: candidate?.is_retained !== undefined ? candidate.is_retained : 1,
-        checklist: JSON.stringify(checklist),
-        status,
-        documents_received_count: receivedCount,
-        documents_total_count: totalDocsCount,
-        updated_at: now,
-      };
-      await setDocData(`establishments/${estId}/exam_candidates`, candidateId, candPayload);
-      await setDocData('exam_candidates', candidateId, candPayload);
-    } catch (fErr) {
-      console.warn('Erreur Firestore check-doc:', fErr);
-    }
-
-    // Enregistrement immuable dans l'historique d'audit
+    // Enregistrement immuable dans l'historique d'audit Firestore
     const logId = `LOG-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
-    try {
-      run(
-        `INSERT INTO exam_dossier_logs (
-          id, establishment_id, candidate_id, student_id, exam_type, doc_id, doc_name,
-          action, user_id, user_name, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`,
-        [
-          logId,
-          estId,
-          candidateId,
-          candidate?.student_id || '',
-          eType,
-          docId,
-          docName || docId,
-          isRec ? 'CHECKED' : 'UNCHECKED',
-          req.user!.id,
-          req.user!.full_name || req.user!.username,
-        ]
-      );
-    } catch {}
+    await setDocData(`establishments/${estId}/exam_dossier_logs`, logId, {
+      id: logId,
+      establishment_id: estId,
+      candidate_id: candidateId,
+      student_id: candidate?.student_id || '',
+      exam_type: eType,
+      doc_id: docId,
+      doc_name: docName || docId,
+      action: isRec ? 'CHECKED' : 'UNCHECKED',
+      user_id: req.user!.id,
+      user_name: req.user!.full_name || req.user!.username,
+      created_at: now,
+    });
 
     res.json({
       success: true,
@@ -9294,19 +8995,24 @@ api.get('/exam-dossiers/candidates/:candidateId/logs', authenticateToken, requir
     const estId = req.user!.establishment_id;
     const { candidateId } = req.params;
 
-    const auditLogs = queryAll<any>(
-      'SELECT * FROM exam_dossier_logs WHERE candidate_id = ? AND establishment_id = ? ORDER BY created_at DESC LIMIT 50',
-      [candidateId, estId]
-    );
+    const [allAuditLogs, allNotifLogs] = await Promise.all([
+      listTenantDocs<any>(estId, 'exam_dossier_logs').catch(() => []),
+      listTenantDocs<any>(estId, 'exam_notification_logs').catch(() => []),
+    ]);
 
-    const notificationLogs = queryAll<any>(
-      'SELECT * FROM exam_notification_logs WHERE candidate_id = ? AND establishment_id = ? ORDER BY created_at DESC LIMIT 50',
-      [candidateId, estId]
-    );
+    const auditLogs = (allAuditLogs || [])
+      .filter((l: any) => l.candidate_id === candidateId)
+      .sort((a: any, b: any) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime())
+      .slice(0, 50);
+
+    const notificationLogs = (allNotifLogs || [])
+      .filter((l: any) => l.candidate_id === candidateId)
+      .sort((a: any, b: any) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime())
+      .slice(0, 50);
 
     res.json({
-      audit_logs: auditLogs || [],
-      notification_logs: notificationLogs || [],
+      audit_logs: auditLogs,
+      notification_logs: notificationLogs,
     });
   } catch (error: any) {
     res.status(500).json({ error: 'Erreur lors de la récupération de l historique.' });
@@ -9326,44 +9032,35 @@ api.post('/exam-dossiers/notifications/send', authenticateToken, requireRole(['D
     const notifId = `NOTIF-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
     const now = new Date().toISOString();
 
-    run(
-      `INSERT INTO exam_notification_logs (
-        id, establishment_id, candidate_id, student_id, recipient_name,
-        recipient_phone, channel, message, sent_by_id, sent_by_name, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        notifId,
-        estId,
-        candidateId,
-        studentId,
-        recipientName || 'Parent / Candidat',
-        recipientPhone || null,
-        channel || 'WHATSAPP',
-        message.trim(),
-        req.user!.id,
-        req.user!.full_name || req.user!.username,
-        now,
-      ]
-    );
+    await setDocData(`establishments/${estId}/exam_notification_logs`, notifId, {
+      id: notifId,
+      establishment_id: estId,
+      candidate_id: candidateId,
+      student_id: studentId || null,
+      recipient_name: recipientName || 'Parent / Candidat',
+      recipient_phone: recipientPhone || null,
+      channel: channel || 'WHATSAPP',
+      message: message.trim(),
+      sent_by_id: req.user!.id,
+      sent_by_name: req.user!.full_name || req.user!.username,
+      created_at: now,
+    });
 
-    // Si canal IN_APP, créer également une circulaire interne
+    // Si canal IN_APP, créer également une circulaire interne dans Firestore
     if (channel === 'IN_APP') {
       try {
         const annId = `ANN-EXAM-${Date.now()}`;
-        run(
-          `INSERT INTO school_announcements (id, establishment_id, title, content, target_audience, category, author_id, author_name)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-          [
-            annId,
-            estId,
-            'Rappel : Pièces manquantes au dossier d examen officiel',
-            message.trim(),
-            'PARENTS',
-            'EXAMEN',
-            req.user!.id,
-            req.user!.full_name,
-          ]
-        );
+        await setDocData(`establishments/${estId}/school_announcements`, annId, {
+          id: annId,
+          establishment_id: estId,
+          title: 'Rappel : Pièces manquantes au dossier d examen officiel',
+          content: message.trim(),
+          target_audience: 'PARENTS',
+          category: 'EXAMEN',
+          author_id: req.user!.id,
+          author_name: req.user!.full_name,
+          created_at: now,
+        });
       } catch (annErr) {
         console.warn('Erreur creation annonce in-app:', annErr);
       }
@@ -9407,25 +9104,19 @@ api.post('/exam-dossiers/notifications/send-bulk', authenticateToken, requireRol
     for (const item of notifications) {
       if (item.candidateId && item.message) {
         const notifId = `NOTIF-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`;
-        run(
-          `INSERT INTO exam_notification_logs (
-            id, establishment_id, candidate_id, student_id, recipient_name,
-            recipient_phone, channel, message, sent_by_id, sent_by_name, created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          [
-            notifId,
-            estId,
-            item.candidateId,
-            item.studentId || '',
-            item.recipientName || 'Parent / Élève',
-            item.recipientPhone || null,
-            channel || 'WHATSAPP',
-            item.message,
-            req.user!.id,
-            req.user!.full_name || req.user!.username,
-            now,
-          ]
-        );
+        await setDocData(`establishments/${estId}/exam_notification_logs`, notifId, {
+          id: notifId,
+          establishment_id: estId,
+          candidate_id: item.candidateId,
+          student_id: item.studentId || '',
+          recipient_name: item.recipientName || 'Parent / Élève',
+          recipient_phone: item.recipientPhone || null,
+          channel: channel || 'WHATSAPP',
+          message: item.message,
+          sent_by_id: req.user!.id,
+          sent_by_name: req.user!.full_name || req.user!.username,
+          created_at: now,
+        });
         sentCount++;
       }
     }
@@ -9452,26 +9143,32 @@ api.get('/exam-dossiers/stats', authenticateToken, requireRole(['DIRECTEUR_ETUDE
     const estId = req.user!.establishment_id;
     const academicYear = (req.query.academicYear as string || '2025-2026');
 
-    // Charger les configs
-    const configs = queryAll<any>(
-      'SELECT * FROM exam_configurations WHERE establishment_id = ? AND academic_year = ?',
-      [estId, academicYear]
-    );
+    // Charger les configs, candidats et classes depuis Firestore
+    const [configs, allCandidates, classes] = await Promise.all([
+      listTenantDocs<any>(estId, 'exam_configurations').catch(() => []),
+      listTenantDocs<any>(estId, 'exam_candidates').catch(() => []),
+      listClasses(estId).catch(() => []),
+    ]);
 
+    const matchingConfigs = (configs || []).filter((c: any) => c.academic_year === academicYear);
     const configMap: Record<string, any> = {};
-    configs.forEach((c) => {
+    matchingConfigs.forEach((c: any) => {
       let docs = [];
-      try { docs = JSON.parse(c.required_documents || '[]'); } catch {}
+      try { docs = typeof c.required_documents === 'string' ? JSON.parse(c.required_documents || '[]') : (c.required_documents || []); } catch {}
       configMap[c.exam_type] = { ...c, required_documents: docs };
     });
 
-    const candidates = queryAll<any>(`
-      SELECT ec.*, COALESCE(ec.serie_code, c.serie_code) as resolved_serie
-      FROM exam_candidates ec
-      LEFT JOIN students s ON ec.student_id = s.id
-      LEFT JOIN classes c ON ec.class_id = c.id
-      WHERE ec.establishment_id = ? AND ec.academic_year = ? AND ec.is_retained = 1
-    `, [estId, academicYear]);
+    const classMap = new Map((classes || []).map((cl: any) => [cl.id, cl]));
+
+    const candidates = (allCandidates || [])
+      .filter((c: any) => c.academic_year === academicYear && (c.is_retained === 1 || c.is_retained === true))
+      .map((c: any) => {
+        const cls = classMap.get(c.class_id) || {};
+        return {
+          ...c,
+          resolved_serie: c.serie_code || cls.serie_code || null,
+        };
+      });
 
     const computeExamStats = (examType: 'BEPC' | 'BAC') => {
       const cfg = configMap[examType] || {
@@ -9629,27 +9326,6 @@ api.put('/staff-attendance/rules', authenticateToken, requireRole(['PROMOTEUR', 
       updated_at: new Date().toISOString(),
     };
 
-    try {
-      run(`
-        INSERT OR REPLACE INTO staff_attendance_rules (
-          id, establishment_id, work_start_time, work_end_time, tolerance_minutes,
-          absence_deduction_rate_per_hour, overtime_hourly_bonus,
-          checkin_mode_preschool_primary, checkin_mode_college_lycee, updated_by, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-      `, [
-        id,
-        estId,
-        payload.work_start_time,
-        payload.work_end_time,
-        payload.tolerance_minutes,
-        payload.absence_deduction_rate_per_hour,
-        payload.overtime_hourly_bonus,
-        payload.checkin_mode_preschool_primary,
-        payload.checkin_mode_college_lycee,
-        req.user!.id,
-      ]);
-    } catch (sqlErr) {}
-
     await setDocData('staff_attendance_rules', estId, payload);
     await setDocData(`establishments/${estId}/staff_attendance_rules`, id, payload);
 
@@ -9766,11 +9442,10 @@ api.post('/teacher-attendances', authenticateToken, requireRole(['SURVEILLANT', 
     if (actualArrivalTime && actualDepartureTime) {
       let existingCheckins: any[] = [];
       try {
-        existingCheckins = queryAll<any>(`
-          SELECT id, actual_arrival_time, actual_departure_time, subject_id, class_ids
-          FROM teacher_attendances
-          WHERE establishment_id = ? AND teacher_id = ? AND date = ? AND is_absent = 0
-        `, [req.user!.establishment_id, teacherId, date]);
+        const allAtts = await listTenantDocs<any>(req.user!.establishment_id, 'teacher_attendances').catch(() => []);
+        existingCheckins = (allAtts || []).filter((a: any) =>
+          a.teacher_id === teacherId && a.date === date && (a.is_absent === 0 || a.is_absent === false)
+        );
       } catch (e) {}
 
       const existingOverlap = existingCheckins.find((c: any) => {
@@ -9850,54 +9525,8 @@ api.post('/teacher-attendances', authenticateToken, requireRole(['SURVEILLANT', 
       updated_at: nowIso,
     };
 
-    // 1. Écriture SQLite
-    try {
-      run(`
-        INSERT INTO teacher_attendances (
-          id, establishment_id, teacher_id, date, subject_id, class_ids,
-          expected_arrival_time, actual_arrival_time, expected_departure_time, actual_departure_time,
-          delay_minutes, early_departure_minutes, scheduled_hours, hours_done,
-          presence_hours, taught_hours, is_absent, status, replacement_teacher_id,
-          is_justified, justification_reason, supporting_doc, observations,
-          validation_status, recorded_by, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'EN_ATTENTE', ?, ?)
-      `, [
-        id,
-        payload.establishment_id,
-        payload.teacher_id,
-        payload.date,
-        payload.subject_id,
-        payload.class_ids,
-        payload.expected_arrival_time,
-        payload.actual_arrival_time,
-        payload.expected_departure_time,
-        payload.actual_departure_time,
-        payload.delay_minutes,
-        payload.early_departure_minutes,
-        payload.scheduled_hours,
-        payload.hours_done,
-        payload.presence_hours,
-        payload.taught_hours,
-        payload.is_absent,
-        payload.status,
-        payload.replacement_teacher_id,
-        payload.is_justified,
-        payload.justification_reason,
-        payload.supportingDoc,
-        payload.observations,
-        payload.recorded_by,
-        nowIso,
-      ]);
-    } catch (sqlErr) {
-      console.warn('Erreur insertion SQLite teacher_attendances:', sqlErr);
-    }
-
-    // 2. Écriture Cloud Firestore
-    try {
-      await setDocData(`establishments/${req.user!.establishment_id}/teacher_attendances`, id, payload);
-    } catch (fErr) {
-      console.warn('Erreur insertion Firestore teacher_attendances:', fErr);
-    }
+    // Écriture Cloud Firestore
+    await setDocData(`establishments/${req.user!.establishment_id}/teacher_attendances`, id, payload);
 
     logAudit(req.user!.establishment_id, req.user!.id, req.user!.full_name, 'POINTAGE_ENSEIGNANT', 'TEACHER_ATTENDANCE', id, {
       teacherId,
@@ -9919,11 +9548,8 @@ api.put('/teacher-attendances/:id/teacher-response', authenticateToken, requireR
     const estId = req.user!.establishment_id;
     const { validationStatus, teacherComment, contestReason, supportingDoc } = req.body;
 
-    let record = queryOne<any>('SELECT * FROM teacher_attendances WHERE id = ? AND teacher_id = ?', [req.params.id, req.user!.id]);
-    if (!record) {
-      record = await getSubcollectionDoc<any>(estId, 'teacher_attendances', req.params.id);
-    }
-    if (!record) {
+    let record = await getSubcollectionDoc<any>(estId, 'teacher_attendances', req.params.id).catch(() => null);
+    if (!record || record.teacher_id !== req.user!.id) {
       return res.status(404).json({ error: 'Fiche de pointage introuvable pour votre compte.' });
     }
 
@@ -9935,26 +9561,7 @@ api.put('/teacher-attendances/:id/teacher-response', authenticateToken, requireR
       updated_at: new Date().toISOString(),
     };
 
-    try {
-      run(`
-        UPDATE teacher_attendances
-        SET validation_status = ?,
-            teacher_comment = COALESCE(?, teacher_comment),
-            contest_reason = COALESCE(?, contest_reason),
-            supporting_doc = COALESCE(?, supporting_doc)
-        WHERE id = ?
-      `, [
-        updates.validation_status,
-        updates.teacher_comment,
-        updates.contest_reason,
-        updates.supporting_doc,
-        req.params.id,
-      ]);
-    } catch {}
-
-    try {
-      await updateDocData(`establishments/${estId}/teacher_attendances`, req.params.id, updates);
-    } catch {}
+    await updateDocData(`establishments/${estId}/teacher_attendances`, req.params.id, updates);
 
     logAudit(estId, req.user!.id, req.user!.full_name, 'REPONSE_POINTAGE_ENSEIGNANT', 'TEACHER_ATTENDANCE', req.params.id, {
       validationStatus,
@@ -9976,10 +9583,7 @@ api.put('/teacher-attendances/:id/correct', authenticateToken, requireRole(['SUR
       return res.status(400).json({ error: 'Le motif de la correction est obligatoire pour modifier ce pointage.' });
     }
 
-    let current = queryOne<any>('SELECT * FROM teacher_attendances WHERE id = ? AND establishment_id = ?', [req.params.id, estId]);
-    if (!current) {
-      current = await getSubcollectionDoc<any>(estId, 'teacher_attendances', req.params.id);
-    }
+    let current = await getSubcollectionDoc<any>(estId, 'teacher_attendances', req.params.id).catch(() => null);
     if (!current) {
       return res.status(404).json({ error: 'Pointage introuvable.' });
     }
@@ -10000,38 +9604,7 @@ api.put('/teacher-attendances/:id/correct', authenticateToken, requireRole(['SUR
       updated_at: new Date().toISOString(),
     };
 
-    try {
-      run(`
-        UPDATE teacher_attendances
-        SET hours_done = COALESCE(?, hours_done),
-            presence_hours = COALESCE(?, presence_hours),
-            taught_hours = COALESCE(?, taught_hours),
-            status = COALESCE(?, status),
-            delay_minutes = COALESCE(?, delay_minutes),
-            is_justified = COALESCE(?, is_justified),
-            justification_reason = COALESCE(?, justification_reason),
-            validation_status = 'EN_CORRECTION',
-            previous_value = ?,
-            correction_reason = ?
-        WHERE id = ? AND establishment_id = ?
-      `, [
-        updates.hours_done,
-        updates.presence_hours,
-        updates.taught_hours,
-        updates.status,
-        updates.delay_minutes,
-        updates.is_justified,
-        updates.justification_reason,
-        prevSummary,
-        correctionReason.trim(),
-        req.params.id,
-        estId,
-      ]);
-    } catch {}
-
-    try {
-      await updateDocData(`establishments/${estId}/teacher_attendances`, req.params.id, updates);
-    } catch {}
+    await updateDocData(`establishments/${estId}/teacher_attendances`, req.params.id, updates);
 
     logAudit(estId, req.user!.id, req.user!.full_name, 'CORRECTION_POINTAGE_AUDITEE', 'TEACHER_ATTENDANCE', req.params.id, {
       previousValue: prevSummary,
@@ -10048,20 +9621,10 @@ api.put('/teacher-attendances/:id/correct', authenticateToken, requireRole(['SUR
 api.put('/teacher-attendances/:id/validate', authenticateToken, requireRole(['DIRECTEUR_ETUDES', 'DIRECTEUR_GENERAL', 'PROMOTEUR']), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const estId = req.user!.establishment_id;
-    try {
-      run(`
-        UPDATE teacher_attendances
-        SET validation_status = 'VALIDE'
-        WHERE id = ? AND establishment_id = ?
-      `, [req.params.id, estId]);
-    } catch {}
-
-    try {
-      await updateDocData(`establishments/${estId}/teacher_attendances`, req.params.id, {
-        validation_status: 'VALIDE',
-        updated_at: new Date().toISOString(),
-      });
-    } catch {}
+    await updateDocData(`establishments/${estId}/teacher_attendances`, req.params.id, {
+      validation_status: 'VALIDE',
+      updated_at: new Date().toISOString(),
+    });
 
     logAudit(estId, req.user!.id, req.user!.full_name, 'VALIDATION_FINALE_POINTAGE', 'TEACHER_ATTENDANCE', req.params.id);
     res.json({ message: 'Pointage validé officiellement pour les registres et la paie.' });
@@ -10162,38 +9725,40 @@ api.get('/teacher-attendances/reports/summary', authenticateToken, requireRole([
 // 15. RÉCLAMATIONS & SIGNALEMENTS (SURVEILLANCE, ENSEIGNANTS, TOUS PROFILS)
 // ==========================================
 
-api.get('/complaints', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+api.get('/complaints', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const estId = req.user!.establishment_id;
     const role = req.user!.role;
     const userId = req.user!.id;
 
-    let sql = `
-      SELECT c.*,
-             u1.full_name as author_full_name,
-             u2.full_name as assigned_to_full_name
-      FROM complaints c
-      LEFT JOIN users u1 ON c.author_id = u1.id
-      LEFT JOIN users u2 ON c.assigned_to_id = u2.id
-      WHERE c.establishment_id = ?
-    `;
-    const params: any[] = [estId];
+    const [rawComplaints, users] = await Promise.all([
+      listTenantDocs<any>(estId, 'complaints').catch(() => []),
+      listTenantUsers(estId).catch(() => []),
+    ]);
+
+    const userMap = new Map((users || []).map((u: any) => [u.id, u.full_name]));
+
+    let complaints = (rawComplaints || []).map((c: any) => ({
+      ...c,
+      author_full_name: userMap.get(c.author_id) || c.author_name || null,
+      assigned_to_full_name: userMap.get(c.assigned_to_id) || c.assigned_to_name || null,
+    }));
 
     // Confidentialité : Les réclamations confidentielles doivent être accessibles uniquement aux personnes habilitées
     if (!['PROMOTEUR', 'DIRECTEUR_GENERAL', 'DIRECTEUR_ETUDES', 'SURVEILLANT'].includes(role)) {
-      sql += ' AND (c.is_confidential = 0 OR c.author_id = ? OR c.assigned_to_id = ?)';
-      params.push(userId, userId);
+      complaints = complaints.filter((c: any) =>
+        c.is_confidential === 0 || c.is_confidential === false || !c.is_confidential || c.author_id === userId || c.assigned_to_id === userId
+      );
     }
 
-    sql += ' ORDER BY c.created_at DESC LIMIT 100';
-    const complaints = queryAll(sql, params);
-    res.json(complaints);
+    complaints.sort((a: any, b: any) => new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime());
+    res.json(complaints.slice(0, 100));
   } catch (error: any) {
     res.status(500).json({ error: 'Erreur lors du chargement des réclamations.' });
   }
 });
 
-api.post('/complaints', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+api.post('/complaints', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const {
       concernedPerson,
@@ -10212,33 +9777,33 @@ api.post('/complaints', authenticateToken, (req: AuthenticatedRequest, res: Resp
 
     const today = new Date().toISOString().split('T')[0];
     const year = new Date().getFullYear();
-    const countRow = queryOne<{ count: number }>('SELECT COUNT(*) as count FROM complaints WHERE establishment_id = ?', [req.user!.establishment_id]);
-    const num = String((countRow?.count || 0) + 1).padStart(4, '0');
+    const existingComplaints = await listTenantDocs<any>(req.user!.establishment_id, 'complaints').catch(() => []);
+    const num = String((existingComplaints.length || 0) + 1).padStart(4, '0');
     const complaintNumber = `REC-${year}-${num}`;
     const id = `CMP-${Date.now().toString(36).toUpperCase()}`;
+    const nowIso = new Date().toISOString();
 
-    run(`
-      INSERT INTO complaints (
-        id, establishment_id, complaint_number, date, concerned_person,
-        category, description, supporting_doc, author_id, author_name,
-        assigned_to_id, assigned_to_name, priority, is_confidential, status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'RECUE')
-    `, [
+    const payload = {
       id,
-      req.user!.establishment_id,
-      complaintNumber,
-      today,
-      concernedPerson.trim(),
+      establishment_id: req.user!.establishment_id,
+      complaint_number: complaintNumber,
+      date: today,
+      concerned_person: concernedPerson.trim(),
       category,
-      description.trim(),
-      supportingDoc || null,
-      req.user!.id,
-      req.user!.full_name,
-      assignedToId || null,
-      assignedToName || null,
-      priority || 'NORMALE',
-      isConfidential ? 1 : 0,
-    ]);
+      description: description.trim(),
+      supporting_doc: supportingDoc || null,
+      author_id: req.user!.id,
+      author_name: req.user!.full_name,
+      assigned_to_id: assignedToId || null,
+      assigned_to_name: assignedToName || null,
+      priority: priority || 'NORMALE',
+      is_confidential: isConfidential ? 1 : 0,
+      status: 'RECUE',
+      created_at: nowIso,
+      updated_at: nowIso,
+    };
+
+    await setDocData(`establishments/${req.user!.establishment_id}/complaints`, id, payload);
 
     logAudit(req.user!.establishment_id, req.user!.id, req.user!.full_name, 'ENREGISTREMENT_RECLAMATION', 'COMPLAINT', id, {
       complaintNumber,
@@ -10253,28 +9818,20 @@ api.post('/complaints', authenticateToken, (req: AuthenticatedRequest, res: Resp
   }
 });
 
-api.put('/complaints/:id/respond', authenticateToken, requireRole(['SURVEILLANT', 'DIRECTEUR_ETUDES', 'DIRECTEUR_GENERAL', 'PROMOTEUR']), (req: AuthenticatedRequest, res: Response) => {
+api.put('/complaints/:id/respond', authenticateToken, requireRole(['SURVEILLANT', 'DIRECTEUR_ETUDES', 'DIRECTEUR_GENERAL', 'PROMOTEUR']), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { response, status, assignedToId, assignedToName } = req.body;
+    const nowIso = new Date().toISOString();
 
-    run(`
-      UPDATE complaints
-      SET response = COALESCE(?, response),
-          status = COALESCE(?, status),
-          assigned_to_id = COALESCE(?, assigned_to_id),
-          assigned_to_name = COALESCE(?, assigned_to_name),
-          responded_by = ?,
-          responded_at = datetime('now')
-      WHERE id = ? AND establishment_id = ?
-    `, [
-      response !== undefined ? response : null,
-      status || null,
-      assignedToId || null,
-      assignedToName || null,
-      req.user!.full_name,
-      req.params.id,
-      req.user!.establishment_id,
-    ]);
+    await updateDocData(`establishments/${req.user!.establishment_id}/complaints`, req.params.id, {
+      response: response !== undefined ? response : null,
+      status: status || null,
+      assigned_to_id: assignedToId || null,
+      assigned_to_name: assignedToName || null,
+      responded_by: req.user!.full_name,
+      responded_at: nowIso,
+      updated_at: nowIso,
+    });
 
     logAudit(req.user!.establishment_id, req.user!.id, req.user!.full_name, 'REPONSE_RECLAMATION', 'COMPLAINT', req.params.id, {
       status,
@@ -10290,22 +9847,29 @@ api.put('/complaints/:id/respond', authenticateToken, requireRole(['SURVEILLANT'
 // 15. DÉCISIONS DE DIRECTION (DG & PROMOTEUR)
 // ==========================================
 
-api.get('/decisions', authenticateToken, requireRole(['DIRECTEUR_GENERAL', 'PROMOTEUR', 'DIRECTEUR_ETUDES']), (req: AuthenticatedRequest, res: Response) => {
+api.get('/decisions', authenticateToken, requireRole(['DIRECTEUR_GENERAL', 'PROMOTEUR', 'DIRECTEUR_ETUDES']), async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const decisions = queryAll(`
-      SELECT ad.*, u.full_name as created_by_name
-      FROM administrative_decisions ad
-      JOIN users u ON ad.created_by = u.id
-      WHERE ad.establishment_id = ?
-      ORDER BY ad.request_date DESC
-    `, [req.user!.establishment_id]);
+    const estId = req.user!.establishment_id;
+    const [rawDecisions, users] = await Promise.all([
+      listTenantDocs<any>(estId, 'administrative_decisions').catch(() => []),
+      listTenantUsers(estId).catch(() => []),
+    ]);
+
+    const userMap = new Map((users || []).map((u: any) => [u.id, u.full_name]));
+
+    const decisions = (rawDecisions || []).map((d: any) => ({
+      ...d,
+      created_by_name: userMap.get(d.created_by) || d.created_by_name || 'Utilisateur',
+    }));
+
+    decisions.sort((a: any, b: any) => (b.request_date || '').localeCompare(a.request_date || ''));
     res.json(decisions);
   } catch (error: any) {
     res.status(500).json({ error: 'Erreur lors de la récupération des décisions.' });
   }
 });
 
-api.post('/decisions', authenticateToken, requireRole(['DIRECTEUR_GENERAL', 'PROMOTEUR', 'DIRECTEUR_ETUDES', 'GESTIONNAIRE', 'COMPTABLE', 'SURVEILLANT']), (req: AuthenticatedRequest, res: Response) => {
+api.post('/decisions', authenticateToken, requireRole(['DIRECTEUR_GENERAL', 'PROMOTEUR', 'DIRECTEUR_ETUDES', 'GESTIONNAIRE', 'COMPTABLE', 'SURVEILLANT']), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { subject, requesterName, service, requestDate, description, supportingDocs, assignedTo, deadline } = req.body;
     if (!subject || !requesterName || !service || !description) {
@@ -10314,25 +9878,27 @@ api.post('/decisions', authenticateToken, requireRole(['DIRECTEUR_GENERAL', 'PRO
 
     const id = `DEC-${Date.now().toString(36).toUpperCase()}`;
     const date = requestDate || new Date().toISOString().split('T')[0];
+    const nowIso = new Date().toISOString();
 
-    run(`
-      INSERT INTO administrative_decisions (
-        id, establishment_id, subject, requester_name, service, request_date,
-        description, supporting_docs, decision, assigned_to, deadline, status, created_by
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'EN_ATTENTE', ?, ?, 'OUVERT', ?)
-    `, [
+    const payload = {
       id,
-      req.user!.establishment_id,
-      subject.trim(),
-      requesterName.trim(),
-      service.trim(),
-      date,
-      description.trim(),
-      supportingDocs || null,
-      assignedTo || null,
-      deadline || null,
-      req.user!.id,
-    ]);
+      establishment_id: req.user!.establishment_id,
+      subject: subject.trim(),
+      requester_name: requesterName.trim(),
+      service: service.trim(),
+      request_date: date,
+      description: description.trim(),
+      supporting_docs: supportingDocs || null,
+      decision: 'EN_ATTENTE',
+      assigned_to: assignedTo || null,
+      deadline: deadline || null,
+      status: 'OUVERT',
+      created_by: req.user!.id,
+      created_at: nowIso,
+      updated_at: nowIso,
+    };
+
+    await setDocData(`establishments/${req.user!.establishment_id}/administrative_decisions`, id, payload);
 
     logAudit(req.user!.establishment_id, req.user!.id, req.user!.full_name, 'DEMANDE_DECISION_DIRECTION', 'DECISION', id, {
       subject,
@@ -10345,19 +9911,18 @@ api.post('/decisions', authenticateToken, requireRole(['DIRECTEUR_GENERAL', 'PRO
   }
 });
 
-api.put('/decisions/:id', authenticateToken, requireRole(['DIRECTEUR_GENERAL', 'PROMOTEUR']), (req: AuthenticatedRequest, res: Response) => {
+api.put('/decisions/:id', authenticateToken, requireRole(['DIRECTEUR_GENERAL', 'PROMOTEUR']), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { decision, reason, assignedTo, deadline, status } = req.body;
 
-    run(`
-      UPDATE administrative_decisions
-      SET decision = COALESCE(?, decision),
-          reason = COALESCE(?, reason),
-          assigned_to = COALESCE(?, assigned_to),
-          deadline = COALESCE(?, deadline),
-          status = COALESCE(?, status)
-      WHERE id = ? AND establishment_id = ?
-    `, [decision, reason, assignedTo, deadline, status, req.params.id, req.user!.establishment_id]);
+    const updates: any = { updated_at: new Date().toISOString() };
+    if (decision !== undefined) updates.decision = decision;
+    if (reason !== undefined) updates.reason = reason;
+    if (assignedTo !== undefined) updates.assigned_to = assignedTo;
+    if (deadline !== undefined) updates.deadline = deadline;
+    if (status !== undefined) updates.status = status;
+
+    await updateDocData(`establishments/${req.user!.establishment_id}/administrative_decisions`, req.params.id, updates);
 
     logAudit(req.user!.establishment_id, req.user!.id, req.user!.full_name, 'STATUT_DECISION_DIRECTION', 'DECISION', req.params.id, {
       decision,
@@ -10396,7 +9961,7 @@ api.get('/student/portal-data', authenticateToken, async (req: AuthenticatedRequ
       targetStudentId = found ? found.id : '';
     }
     if (!targetStudentId) {
-      const s = queryOne<any>('SELECT id FROM students WHERE establishment_id = ? AND LOWER(matricule) = LOWER(?)', [estId, req.user!.username]);
+      const s = (allStudents || []).find((st: any) => st.matricule && st.matricule.toLowerCase() === req.user!.username.toLowerCase());
       targetStudentId = s ? s.id : '';
     }
     if (!targetStudentId && req.user!.role === 'PARENT') {
@@ -10434,19 +9999,9 @@ api.get('/student/portal-data', authenticateToken, async (req: AuthenticatedRequ
       });
     }
 
-    // 1. Fiche élève complète & classe & professeur principal
+    // 1. Fiche élève complète & classe & professeur principal (100% Firestore)
     let student = (allStudents || []).find((s: any) => s.id === targetStudentId);
-    if (!student) {
-      student = queryOne<any>(`
-        SELECT s.*, 
-               c.name as class_name, c.cycle_code, c.level_code, c.serie_code, c.room,
-               u.full_name as main_teacher_name, u.phone as main_teacher_phone
-        FROM students s
-        LEFT JOIN classes c ON s.class_id = c.id
-        LEFT JOIN users u ON c.main_teacher_id = u.id
-        WHERE s.id = ? AND s.establishment_id = ?
-      `, [targetStudentId, estId]);
-    } else {
+    if (student) {
       const cls = (allClasses || []).find((c: any) => c.id === student.class_id) || {};
       student = {
         ...student,
@@ -10468,11 +10023,6 @@ api.get('/student/portal-data', authenticateToken, async (req: AuthenticatedRequ
     try {
       establishment = await getEstablishment(estId);
     } catch {}
-    if (!establishment) {
-      try {
-        establishment = queryOne<any>('SELECT * FROM establishments WHERE id = ?', [estId]);
-      } catch {}
-    }
     if (!establishment) {
       establishment = {
         id: estId,
@@ -10790,7 +10340,7 @@ api.get('/student/portal-data', authenticateToken, async (req: AuthenticatedRequ
 });
 
 // Soumission de justification d'absence par Élève ou Parent
-api.post('/student/absence-justification', authenticateToken, (req: AuthenticatedRequest, res: Response) => {
+api.post('/student/absence-justification', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { studentId, attendanceId, date, reason, documentUrl } = req.body;
     if (!studentId || !date || !reason) {
@@ -10799,23 +10349,24 @@ api.post('/student/absence-justification', authenticateToken, (req: Authenticate
 
     const estId = req.user!.establishment_id;
     const id = `JUSTIF-${Date.now().toString(36).toUpperCase()}`;
+    const nowIso = new Date().toISOString();
 
-    run(`
-      INSERT INTO absence_justifications (
-        id, establishment_id, student_id, attendance_id, date, reason,
-        document_url, submitted_by_id, submitted_by_role, status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'EN_ATTENTE')
-    `, [
+    const payload = {
       id,
-      estId,
-      studentId,
-      attendanceId || null,
+      establishment_id: estId,
+      student_id: studentId,
+      attendance_id: attendanceId || null,
       date,
-      reason.trim(),
-      documentUrl || null,
-      req.user!.id,
-      req.user!.role,
-    ]);
+      reason: reason.trim(),
+      document_url: documentUrl || null,
+      submitted_by_id: req.user!.id,
+      submitted_by_role: req.user!.role,
+      status: 'EN_ATTENTE',
+      created_at: nowIso,
+      updated_at: nowIso,
+    };
+
+    await setDocData(`establishments/${estId}/absence_justifications`, id, payload);
 
     logAudit(estId, req.user!.id, req.user!.full_name, 'DEPOT_JUSTIFICATION_ABSENCE', 'ABSENCE', id, {
       studentId,
@@ -10830,28 +10381,36 @@ api.post('/student/absence-justification', authenticateToken, (req: Authenticate
 });
 
 // Liste de toutes les justifications d'absence pour la vie scolaire (Surveillance & Direction)
-api.get('/student/justifications', authenticateToken, requireRole(['SURVEILLANT', 'DIRECTEUR_ETUDES', 'DIRECTEUR_GENERAL', 'PROMOTEUR', 'ENSEIGNANT', 'ADMIN_GENERAL']), (req: AuthenticatedRequest, res: Response) => {
+api.get('/student/justifications', authenticateToken, requireRole(['SURVEILLANT', 'DIRECTEUR_ETUDES', 'DIRECTEUR_GENERAL', 'PROMOTEUR', 'ENSEIGNANT', 'ADMIN_GENERAL']), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const estId = req.user!.establishment_id;
-    const justifications = queryAll<any>(`
-      SELECT 
-        aj.*,
-        s.first_name,
-        s.last_name,
-        s.matricule,
-        c.name as class_name,
-        u.full_name as submitted_by_name,
-        rev.full_name as reviewed_by_name
-      FROM absence_justifications aj
-      JOIN students s ON aj.student_id = s.id
-      LEFT JOIN classes c ON s.class_id = c.id
-      LEFT JOIN users u ON aj.submitted_by_id = u.id
-      LEFT JOIN users rev ON aj.reviewed_by_id = rev.id
-      WHERE aj.establishment_id = ?
-      ORDER BY aj.created_at DESC
-    `, [estId]);
+    const [rawJustifs, students, classes, users] = await Promise.all([
+      listTenantDocs<any>(estId, 'absence_justifications').catch(() => []),
+      listStudents(estId).catch(() => []),
+      listClasses(estId).catch(() => []),
+      listTenantUsers(estId).catch(() => []),
+    ]);
 
-    res.json(justifications || []);
+    const studentMap = new Map((students || []).map((s: any) => [s.id, s]));
+    const classMap = new Map((classes || []).map((c: any) => [c.id, c]));
+    const userMap = new Map((users || []).map((u: any) => [u.id, u.full_name]));
+
+    const justifications = (rawJustifs || []).map((aj: any) => {
+      const s = studentMap.get(aj.student_id) || {};
+      const c = classMap.get(s.class_id) || {};
+      return {
+        ...aj,
+        first_name: s.first_name || '',
+        last_name: s.last_name || '',
+        matricule: s.matricule || '',
+        class_name: c.name || s.class_name || '',
+        submitted_by_name: userMap.get(aj.submitted_by_id) || aj.submitted_by_name || null,
+        reviewed_by_name: userMap.get(aj.reviewed_by_id) || aj.reviewed_by_name || null,
+      };
+    });
+
+    justifications.sort((a: any, b: any) => (b.created_at || '').localeCompare(a.created_at || ''));
+    res.json(justifications);
   } catch (error: any) {
     console.error('Erreur get /student/justifications:', error);
     res.status(500).json({ error: 'Erreur lors du chargement des justifications d absence.' });
@@ -10859,7 +10418,7 @@ api.get('/student/justifications', authenticateToken, requireRole(['SURVEILLANT'
 });
 
 // Examen et validation/rejet d'une justification d'absence par la vie scolaire
-api.put('/student/justifications/:id/review', authenticateToken, requireRole(['SURVEILLANT', 'DIRECTEUR_ETUDES', 'DIRECTEUR_GENERAL', 'PROMOTEUR', 'ADMIN_GENERAL']), (req: AuthenticatedRequest, res: Response) => {
+api.put('/student/justifications/:id/review', authenticateToken, requireRole(['SURVEILLANT', 'DIRECTEUR_ETUDES', 'DIRECTEUR_GENERAL', 'PROMOTEUR', 'ADMIN_GENERAL']), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { id } = req.params;
     const { status, reviewNote } = req.body;
@@ -10869,32 +10428,35 @@ api.put('/student/justifications/:id/review', authenticateToken, requireRole(['S
       return res.status(400).json({ error: 'Statut de révision invalide.' });
     }
 
-    const justif = queryOne<any>('SELECT * FROM absence_justifications WHERE id = ? AND establishment_id = ?', [id, estId]);
+    const justif = await getSubcollectionDoc<any>(estId, 'absence_justifications', id).catch(() => null);
     if (!justif) {
       return res.status(404).json({ error: 'Justificatif d absence introuvable.' });
     }
 
-    run(`
-      UPDATE absence_justifications
-      SET status = ?, review_note = ?, reviewed_by_id = ?, reviewed_at = CURRENT_TIMESTAMP
-      WHERE id = ? AND establishment_id = ?
-    `, [status, reviewNote || null, req.user!.id, id, estId]);
+    const nowIso = new Date().toISOString();
+    await updateDocData(`establishments/${estId}/absence_justifications`, id, {
+      status,
+      review_note: reviewNote || null,
+      reviewed_by_id: req.user!.id,
+      reviewed_at: nowIso,
+      updated_at: nowIso,
+    });
 
-    // Si la justification est approuvée, régulariser la présence correspondante
+    // Si la justification est approuvée, régulariser la présence correspondante dans Firestore
     if (status === 'APPROUVE') {
       try {
-        if (justif.attendance_id) {
-          run(`
-            UPDATE student_attendances
-            SET is_justified = 1, justification_reason = ?
-            WHERE id = ? AND establishment_id = ?
-          `, [justif.reason || 'Justifiée par l administration', justif.attendance_id, estId]);
-        } else if (justif.student_id && justif.date) {
-          run(`
-            UPDATE student_attendances
-            SET is_justified = 1, justification_reason = ?
-            WHERE student_id = ? AND date = ? AND establishment_id = ?
-          `, [justif.reason || 'Justifiée par l administration', justif.student_id, justif.date, estId]);
+        const studentAttendances = await listTenantDocs<any>(estId, 'student_attendances').catch(() => []);
+        const matchingAtt = (studentAttendances || []).find((sa: any) => {
+          if (justif.attendance_id && sa.id === justif.attendance_id) return true;
+          return sa.student_id === justif.student_id && sa.date === justif.date;
+        });
+
+        if (matchingAtt) {
+          await updateDocData(`establishments/${estId}/student_attendances`, matchingAtt.id, {
+            is_justified: 1,
+            justification_reason: justif.reason || 'Justifiée par l administration',
+            updated_at: nowIso,
+          });
         }
       } catch (attErr) {
         console.warn('Erreur mise à jour présence suite justification:', attErr);

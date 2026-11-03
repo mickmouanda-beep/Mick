@@ -1,33 +1,103 @@
 import 'dotenv/config';
+import fs from 'fs';
+import path from 'path';
 import admin from 'firebase-admin';
 import { initializeApp, cert, getApps } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
+
+// 1. Lecture sécurisée de la configuration du compte de service (s'il existe)
+if (!process.env.FIREBASE_SERVICE_ACCOUNT) {
+  try {
+    const saPath = path.resolve(process.cwd(), '.env.service_account');
+    if (fs.existsSync(saPath)) {
+      process.env.FIREBASE_SERVICE_ACCOUNT = fs.readFileSync(saPath, 'utf8').trim();
+    }
+  } catch {}
+}
 
 let serviceAccount: any = null;
 if (process.env.FIREBASE_SERVICE_ACCOUNT) {
   try {
     serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
   } catch (err: any) {
-    console.error('Erreur parsing FIREBASE_SERVICE_ACCOUNT:', err?.message);
+    console.error('[Firebase] Erreur parsing FIREBASE_SERVICE_ACCOUNT:', err?.message || err);
   }
 }
 
-export const firebaseProjectId = serviceAccount?.project_id || 'soy-spanner-zn2tx';
+// 2. Lecture sécurisée de firebase-applet-config.json
+let configData: any = null;
+try {
+  const configPath = path.resolve(process.cwd(), 'firebase-applet-config.json');
+  if (fs.existsSync(configPath)) {
+    configData = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  }
+} catch (e: any) {
+  console.warn('[Firebase] Impossible de lire firebase-applet-config.json:', e?.message);
+}
 
-const app = getApps().length > 0
-  ? getApps()[0]
-  : initializeApp({
-      credential: serviceAccount ? cert(serviceAccount) : undefined,
+export const firebaseProjectId =
+  serviceAccount?.project_id ||
+  configData?.projectId ||
+  process.env.FIREBASE_PROJECT_ID ||
+  'soy-spanner-zn2tx';
+
+// 3. Détection de la base Firestore cible (base par défaut vs base nommée)
+let targetDatabaseId: string | undefined = undefined;
+if (serviceAccount?.project_id) {
+  // Si un compte de service dédié est fourni en environnement, il cible la base de son projet
+  targetDatabaseId = undefined;
+} else if (configData?.firestoreDatabaseId && configData.firestoreDatabaseId !== '(default)') {
+  targetDatabaseId = configData.firestoreDatabaseId;
+}
+
+// 4. Initialisation sécurisée de l'application Firebase
+let app: any = null;
+try {
+  const existingApps = getApps();
+  if (existingApps.length > 0) {
+    app = existingApps[0];
+  } else if (serviceAccount && serviceAccount.project_id && serviceAccount.private_key) {
+    app = initializeApp({
+      credential: cert(serviceAccount),
       projectId: firebaseProjectId,
     });
-
-// Base « (default) »
-export const db = getFirestore(app);
-try {
-  db.settings({ ignoreUndefinedProperties: true });
-} catch (e) {
-  // settings already initialized
+  } else {
+    app = initializeApp({
+      projectId: firebaseProjectId,
+    });
+  }
+} catch (appErr: any) {
+  console.error('[Firebase] Avertissement lors de initializeApp (tentative de récupération de l\'app active):', appErr?.message || appErr);
+  const apps = getApps();
+  app = apps.length > 0 ? apps[0] : null;
 }
+
+// 5. Initialisation sécurisée de l'instance Firestore
+let firestoreInstance: any = null;
+try {
+  if (app) {
+    firestoreInstance = targetDatabaseId
+      ? getFirestore(app, targetDatabaseId)
+      : getFirestore(app);
+    try {
+      firestoreInstance.settings({ ignoreUndefinedProperties: true });
+    } catch {}
+  }
+} catch (fsErr: any) {
+  console.error(`[Firebase] Erreur initialisation Firestore (${targetDatabaseId || 'default'}):`, fsErr?.message || fsErr);
+  if (targetDatabaseId && app) {
+    try {
+      console.log('[Firebase] Tentative de repli vers la base par défaut...');
+      firestoreInstance = getFirestore(app);
+      firestoreInstance.settings({ ignoreUndefinedProperties: true });
+    } catch (fsFallbackErr: any) {
+      console.error('[Firebase] Erreur repli Firestore par défaut:', fsFallbackErr?.message || fsFallbackErr);
+    }
+  }
+}
+
+export const db = firestoreInstance;
+
 
 export const OperationType = {
   CREATE: 'create',
@@ -232,9 +302,24 @@ export async function setTenantUser(idOrEstId: string, dataOrNull?: any) {
 }
 
 export async function listTenantUsers(establishmentId: string) {
-  const subcolUsers = await listDocs<any>(`establishments/${establishmentId}/users`);
-  if (subcolUsers && subcolUsers.length > 0) return subcolUsers;
-  return queryDocs('users', 'establishment_id', '==', establishmentId);
+  let subcolUsers: any[] = [];
+  try {
+    subcolUsers = await listDocs<any>(`establishments/${establishmentId}/users`);
+  } catch {}
+
+  let rootUsers: any[] = [];
+  try {
+    rootUsers = await queryDocs<any>('users', 'establishment_id', '==', establishmentId);
+  } catch {}
+
+  const userMap = new Map<string, any>();
+  for (const u of [...subcolUsers, ...rootUsers]) {
+    if (u && u.id && u.establishment_id === establishmentId) {
+      userMap.set(u.id, u);
+    }
+  }
+
+  return Array.from(userMap.values());
 }
 
 export async function findUsersByUsernameOrEmail(username: string, targetEstablishmentId?: string, email?: string) {
@@ -251,13 +336,19 @@ export async function findUsersByUsernameOrEmail(username: string, targetEstabli
 
   let rootUsers: any[] = [];
   try {
-    rootUsers = await listDocs<any>('users');
+    if (targetEstablishmentId) {
+      rootUsers = await queryDocs<any>('users', 'establishment_id', '==', targetEstablishmentId);
+    } else {
+      rootUsers = await listDocs<any>('users');
+    }
   } catch {}
 
   const userMap = new Map<string, any>();
   for (const u of [...tenantUsers, ...rootUsers]) {
     if (u && u.id) {
-      userMap.set(u.id, u);
+      if (!targetEstablishmentId || u.establishment_id === targetEstablishmentId) {
+        userMap.set(u.id, u);
+      }
     }
   }
 
@@ -508,4 +599,57 @@ export async function deleteCurriculumProgramDoc(establishmentId: string, progra
   }
   return deleteDocData('curriculum_programs', programId);
 }
+
+// 10. Student Matricule Generator (CODEECOLE-ANNÉESCOLAIRE-NUMÉRO)
+export function formatAcademicYearForMatricule(yearStr: string | null | undefined): string {
+  if (!yearStr) return '2026/27';
+  const clean = yearStr.trim();
+  const matchFull = clean.match(/^(\d{4})[-/](\d{4})$/);
+  if (matchFull) {
+    const startYear = matchFull[1];
+    const endYear = matchFull[2].slice(-2);
+    return `${startYear}/${endYear}`;
+  }
+  const matchShort = clean.match(/^(\d{4})[-/](\d{2})$/);
+  if (matchShort) {
+    return `${matchShort[1]}/${matchShort[2]}`;
+  }
+  const matchSingle = clean.match(/^(\d{4})$/);
+  if (matchSingle) {
+    const start = parseInt(matchSingle[1], 10);
+    const end = String(start + 1).slice(-2);
+    return `${start}/${end}`;
+  }
+  return clean.replace('-', '/');
+}
+
+export async function generateNextStudentMatricule(
+  establishmentId: string,
+  schoolCode: string,
+  academicYear: string
+): Promise<string> {
+  const formattedYear = formatAcademicYearForMatricule(academicYear);
+  const cleanCode = (schoolCode || 'ECO').trim().toUpperCase().replace(/[^A-Z0-9-]/g, '');
+  const yearKey = formattedYear.replace('/', '_');
+  const counterRef = db.collection(`establishments/${establishmentId}/counters`).doc(`student_matricule_${yearKey}`);
+
+  const seqNumber = await db.runTransaction(async (transaction: any) => {
+    const snap = await transaction.get(counterRef);
+    let nextSeq = 1;
+    if (snap.exists) {
+      const data = snap.data();
+      nextSeq = (Number(data?.current_seq) || 0) + 1;
+    }
+    transaction.set(counterRef, {
+      current_seq: nextSeq,
+      academic_year: formattedYear,
+      updated_at: new Date().toISOString()
+    }, { merge: true });
+    return nextSeq;
+  });
+
+  const paddedSeq = seqNumber.toString().padStart(4, '0');
+  return `${cleanCode}-${formattedYear}-${paddedSeq}`;
+}
+
 

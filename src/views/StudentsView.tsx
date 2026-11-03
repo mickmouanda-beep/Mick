@@ -709,6 +709,7 @@ export const StudentsView: React.FC = () => {
                       className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-lg text-white"
                     >
                       <option value="Père">Père</option>
+                      <option value="Mère">Mère</option>
                       <option value="Parent / Tuteur">Parent / Tuteur</option>
                       <option value="Tuteur Légal">Tuteur Légal</option>
                       <option value="Autre">Autre</option>
@@ -1604,7 +1605,8 @@ export const StudentsView: React.FC = () => {
                     <span className="text-emerald-300 font-semibold text-[11px]">
                       {createdAccountsModal.accounts.parentAccount.isNew
                         ? 'Nouveau compte tuteur créé'
-                        : `Rattaché au compte existant (${createdAccountsModal.accounts.parentAccount.linkedStudentsCount} enfant(s))`}
+                        : `Rattaché au compte tuteur existant de cet établissement (${createdAccountsModal.accounts.parentAccount.linkedStudentsCount} enfant(s))`
+                      }
                     </span>
                   </div>
                 </div>

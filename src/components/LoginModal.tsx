@@ -487,17 +487,32 @@ export const LoginModal: React.FC<LoginModalProps> = ({ onSuccess }) => {
           )}
 
           {/* VUE 1 : FORMULAIRE DE CONNEXION PRINCIPAL */}
-          {activeView === 'login' && !schoolOptions && (
+          {activeView === 'login' && (
             <form onSubmit={handleSubmit} className="space-y-3.5">
-              {/* Champ 1 : Identifiant ou adresse e-mail */}
+              {/* Champ 1 : Code d'établissement (Obligatoire) */}
+              <div className="relative">
+                <div className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-4 py-3 flex items-center space-x-3 text-slate-800 focus-within:ring-2 focus-within:ring-blue-600 focus-within:border-blue-600 focus-within:bg-white transition-all shadow-xs">
+                  <Building2 className="w-5 h-5 text-blue-600 shrink-0" />
+                  <input
+                    type="text"
+                    required
+                    autoFocus
+                    placeholder="Code d’établissement * (ex: ECOLE1)"
+                    value={establishmentCode}
+                    onChange={(e) => setEstablishmentCode(e.target.value.toUpperCase())}
+                    className="w-full bg-transparent text-sm text-slate-900 placeholder-slate-400 font-medium font-mono uppercase focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              {/* Champ 2 : Identifiant ou adresse e-mail */}
               <div className="relative">
                 <div className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-4 py-3 flex items-center space-x-3 text-slate-800 focus-within:ring-2 focus-within:ring-blue-600 focus-within:border-blue-600 focus-within:bg-white transition-all shadow-xs">
                   <User className="w-5 h-5 text-blue-600 shrink-0" />
                   <input
                     type="text"
                     required
-                    autoFocus
-                    placeholder="Identifiant, matricule ou téléphone"
+                    placeholder="Identifiant, matricule ou téléphone *"
                     value={username}
                     onChange={(e) => setUsername(e.target.value)}
                     className="w-full bg-transparent text-sm text-slate-900 placeholder-slate-400 font-medium focus:outline-none"
@@ -515,14 +530,14 @@ export const LoginModal: React.FC<LoginModalProps> = ({ onSuccess }) => {
                 <span className="text-emerald-700 font-medium">Parents (Téléphone)</span>
               </div>
 
-              {/* Champ 2 : Mot de passe avec œil afficher/masquer */}
+              {/* Champ 3 : Mot de passe avec œil afficher/masquer */}
               <div className="relative">
                 <div className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-4 py-3 flex items-center space-x-3 text-slate-800 focus-within:ring-2 focus-within:ring-blue-600 focus-within:border-blue-600 focus-within:bg-white transition-all shadow-xs">
                   <Lock className="w-5 h-5 text-blue-600 shrink-0" />
                   <input
                     type={showPassword ? 'text' : 'password'}
                     required
-                    placeholder="Mot de passe"
+                    placeholder="Mot de passe *"
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
                     className="w-full bg-transparent text-sm text-slate-900 placeholder-slate-400 font-medium focus:outline-none"
@@ -535,20 +550,6 @@ export const LoginModal: React.FC<LoginModalProps> = ({ onSuccess }) => {
                   >
                     {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                   </button>
-                </div>
-              </div>
-
-              {/* Champ 3 : Code d'établissement (optionnel) */}
-              <div className="relative">
-                <div className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-4 py-3 flex items-center space-x-3 text-slate-800 focus-within:ring-2 focus-within:ring-blue-600 focus-within:border-blue-600 focus-within:bg-white transition-all shadow-xs">
-                  <Building2 className="w-5 h-5 text-blue-600 shrink-0" />
-                  <input
-                    type="text"
-                    placeholder="Code d’établissement (optionnel)"
-                    value={establishmentCode}
-                    onChange={(e) => setEstablishmentCode(e.target.value.toUpperCase())}
-                    className="w-full bg-transparent text-sm text-slate-900 placeholder-slate-400 font-medium font-mono uppercase focus:outline-none"
-                  />
                 </div>
               </div>
 
