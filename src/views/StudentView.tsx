@@ -24,8 +24,8 @@ import {
 } from 'lucide-react';
 import { api } from '../lib/api.ts';
 import { useAuth } from '../context/AuthContext.tsx';
-import { StudentPortalData, AbsenceJustification, Payment } from '../types.ts';
-import { printDocument, downloadPdf } from '../utils/printPdfUtils.ts';
+import { StudentPortalData, Payment } from '../types.ts';
+import { printDocument, downloadPdf, printReportCardPdf, downloadReportCardPdf } from '../utils/printPdfUtils.ts';
 import { PrintHeader } from '../components/PrintHeader.tsx';
 import { PaymentReceiptModal } from '../components/PaymentReceiptModal.tsx';
 
@@ -729,14 +729,58 @@ export const StudentView: React.FC<StudentViewProps> = ({ studentIdOverride, rea
 
                     <div className="flex items-center space-x-2 pt-1 no-print">
                       <button
-                        onClick={() => printDocument(`printable-bulletin-${b.id}`, `Bulletin_${student.matricule}_${b.termLabel}`)}
+                        onClick={() =>
+                          printReportCardPdf(
+                            {
+                              student_name: `${student.last_name || ''} ${student.first_name || ''}`.trim(),
+                              student_matricule: student.matricule,
+                              class_name: student.class_name,
+                              term: b.termLabel,
+                              general_average: b.generalAverage,
+                              class_average: b.classAverage,
+                              rank: b.rank,
+                              total_students: b.totalStudents,
+                              decision: b.directorRemarks,
+                              subjects: b.grades?.map((g: any) => ({
+                                subject_name: g.subject || g.name || 'Matière',
+                                coefficient: g.coefficient || 1,
+                                average_score: g.studentAverage,
+                                appreciation: g.appreciation,
+                                teacher_name: g.teacher,
+                              })),
+                            },
+                            establishment
+                          )
+                        }
                         className="flex-1 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-lg text-xs font-semibold flex items-center justify-center space-x-1.5 transition cursor-pointer"
                       >
                         <Printer className="w-3.5 h-3.5" />
                         <span>Imprimer</span>
                       </button>
                       <button
-                        onClick={() => downloadPdf(`printable-bulletin-${b.id}`, `Bulletin_${student.matricule}_${b.termLabel}.pdf`)}
+                        onClick={() =>
+                          downloadReportCardPdf(
+                            {
+                              student_name: `${student.last_name || ''} ${student.first_name || ''}`.trim(),
+                              student_matricule: student.matricule,
+                              class_name: student.class_name,
+                              term: b.termLabel,
+                              general_average: b.generalAverage,
+                              class_average: b.classAverage,
+                              rank: b.rank,
+                              total_students: b.totalStudents,
+                              decision: b.directorRemarks,
+                              subjects: b.grades?.map((g: any) => ({
+                                subject_name: g.subject || g.name || 'Matière',
+                                coefficient: g.coefficient || 1,
+                                average_score: g.studentAverage,
+                                appreciation: g.appreciation,
+                                teacher_name: g.teacher,
+                              })),
+                            },
+                            establishment
+                          )
+                        }
                         className="flex-1 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-semibold flex items-center justify-center space-x-1.5 transition cursor-pointer"
                       >
                         <Download className="w-3.5 h-3.5" />

@@ -24,12 +24,9 @@ async function startServer() {
   const app = express();
   const isProduction = process.env.NODE_ENV === 'production';
 
-  // 2. PORT FIXÉ DE MANIÈRE DÉFINITIVE SUR 3000
-  // Dans l'environnement Cloud Run containerisé, Nginx écoute déjà sur le port 8080 (process.env.PORT)
-  // et proxyfie le trafic externe vers localhost:3000.
-  // Toute liaison d'Express sur 8080 provoque fatalement `EADDRINUSE: address already in use 0.0.0.0:8080`.
-  // Par conséquent, Express DOIT toujours se lier au port internal 3000.
-  const PORT = 3000;
+  // 2. PORT ADAPTÉ POUR CLOUD RUN ET LOCAL
+  // Cloud Run définit process.env.PORT (ex: 8080). En local, fallback sur 3000.
+  const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
   // 3. Endpoint de santé pour les sondes Cloud Run et Kubernetes (prioritaire, placé au tout début)
   app.get('/healthz', (_req, res) => {
@@ -79,10 +76,33 @@ async function startServer() {
       }
     });
   } else {
-    app.use(express.static(path.resolve(__dirname, 'dist')));
-    app.get('*', (_req, res) => {
-      res.sendFile(path.resolve(__dirname, 'dist', 'index.html'));
-    });
+    const fs = await import('fs');
+    const distPath = path.resolve(__dirname, 'dist');
+    if (fs.existsSync(distPath)) {
+      app.use(express.static(distPath));
+      app.get('*', (_req, res) => {
+        res.sendFile(path.resolve(distPath, 'index.html'));
+      });
+    } else {
+      console.warn('[Eco GES] Dossier dist introuvable en production, basculement en mode middleware Vite de repli.');
+      const { createServer: createViteServer } = await import('vite');
+      const vite = await createViteServer({
+        server: { middlewareMode: true },
+        appType: 'spa',
+      });
+      app.use(vite.middlewares);
+      app.use('*', async (req, res, next) => {
+        try {
+          const url = req.originalUrl;
+          let template = fs.readFileSync(path.resolve(__dirname, 'index.html'), 'utf-8');
+          template = await vite.transformIndexHtml(url, template);
+          res.status(200).set({ 'Content-Type': 'text/html' }).end(template);
+        } catch (e) {
+          vite.ssrFixStacktrace(e as Error);
+          next(e);
+        }
+      });
+    }
   }
 
   // 5. Middleware global d'interception d'erreurs Express (garantit qu'aucune route ne fait tomber le serveur)

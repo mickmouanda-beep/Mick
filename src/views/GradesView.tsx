@@ -14,13 +14,15 @@ import {
   FileSpreadsheet,
   TrendingUp,
   Download,
+  Eye,
+  FileText,
 } from 'lucide-react';
 import { api } from '../lib/api.ts';
 import { useAuth } from '../context/AuthContext.tsx';
 import { Evaluation, SchoolClass, Subject } from '../types.ts';
 import { PrintableReportCard } from '../components/PrintableReportCard.tsx';
 import { CloseButton } from '../components/CloseButton.tsx';
-import { printDocument, downloadPdf } from '../utils/printPdfUtils.ts';
+import { printReportCardPdf, downloadReportCardPdf, downloadListPdf } from '../utils/printPdfUtils.ts';
 
 export const GradesView: React.FC = () => {
   const { establishment, hasRole, user } = useAuth();
@@ -54,9 +56,52 @@ export const GradesView: React.FC = () => {
   const [showReportCardModal, setShowReportCardModal] = useState(false);
   const [selectedStudentForCard, setSelectedStudentForCard] = useState<any | null>(null);
 
+  // Aperçu évaluation
+  const [activeEvalPreview, setActiveEvalPreview] = useState<any | null>(null);
+
+  const handlePreviewEval = async (ev: Evaluation) => {
+    setError(null);
+    try {
+      const data = await api.getEvaluationGrades(ev.id);
+      setActiveEvalPreview(data);
+    } catch (err: any) {
+      setError(err?.message || 'Erreur lors du chargement de l’aperçu.');
+    }
+  };
+
+  const handlePrintEval = async (ev: Evaluation) => {
+    try {
+      const data = await api.getEvaluationGrades(ev.id);
+      const studentsList = data.students || [];
+      const columns = [
+        { header: 'N°', key: 'num' },
+        { header: 'Matricule', key: 'matricule' },
+        { header: 'Nom & Prénoms', key: 'name' },
+        { header: 'Note / Barème', key: 'score' },
+        { header: 'Observations', key: 'remarks' },
+      ];
+      const rows = studentsList.map((s: any, idx: number) => ({
+        num: idx + 1,
+        matricule: s.matricule || '—',
+        name: `${s.last_name || ''} ${s.first_name || ''}`,
+        score: s.is_absent ? 'ABSENT' : (s.score !== null && s.score !== undefined ? `${s.score} / ${ev.max_score}` : '—'),
+        remarks: s.remarks || ''
+      }));
+      await downloadListPdf(`Fiche_Evaluation_${ev.title}_${ev.subject_name}`, columns, rows, establishment);
+    } catch (err: any) {
+      setError(err?.message || 'Erreur lors de l’impression.');
+    }
+  };
+
+  const handleDownloadEvalPdf = async (ev: Evaluation) => {
+    await handlePrintEval(ev);
+  };
+
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [publishing, setPublishing] = useState(false);
+  const [generatingPdf, setGeneratingPdf] = useState(false);
+  const [pdfError, setPdfError] = useState<string | null>(null);
 
   const canLock = hasRole(['PROMOTEUR', 'DIRECTEUR_GENERAL', 'DIRECTEUR_ETUDES']);
 
@@ -228,6 +273,24 @@ export const GradesView: React.FC = () => {
     }
   };
 
+  const handleDownloadReportCard = async (report: any) => {
+    if (!report || !reportCardData) return;
+    setGeneratingPdf(true);
+    setPdfError(null);
+    try {
+      await downloadReportCardPdf(
+        report,
+        reportCardData.establishment,
+        reportCardData.class,
+        reportCardData.term
+      );
+    } catch (err: any) {
+      setPdfError(err.message || "Erreur lors de la génération du PDF.");
+    } finally {
+      setGeneratingPdf(false);
+    }
+  };
+
   return (
     <div className="p-4 sm:p-6 lg:p-8 space-y-6 max-w-7xl mx-auto">
       
@@ -385,10 +448,34 @@ export const GradesView: React.FC = () => {
                         </span>
                       )}
                     </td>
-                    <td className="p-3.5 text-right space-x-2">
+                    <td className="p-3.5 text-right space-x-1.5 whitespace-nowrap">
+                      <button
+                        onClick={() => handlePreviewEval(ev)}
+                        title="Aperçu de l'évaluation"
+                        className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-sky-400 rounded-lg text-xs font-semibold inline-flex items-center space-x-1 transition"
+                      >
+                        <Eye className="w-3.5 h-3.5" />
+                        <span className="hidden sm:inline">Aperçu</span>
+                      </button>
+                      <button
+                        onClick={() => handlePrintEval(ev)}
+                        title="Imprimer l'évaluation"
+                        className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-indigo-400 rounded-lg text-xs font-semibold inline-flex items-center space-x-1 transition"
+                      >
+                        <Printer className="w-3.5 h-3.5" />
+                        <span className="hidden sm:inline">Imprimer</span>
+                      </button>
+                      <button
+                        onClick={() => handleDownloadEvalPdf(ev)}
+                        title="Télécharger l'évaluation en PDF"
+                        className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-emerald-400 rounded-lg text-xs font-semibold inline-flex items-center space-x-1 transition"
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                        <span className="hidden sm:inline">PDF</span>
+                      </button>
                       <button
                         onClick={() => handleOpenGrading(ev.id)}
-                        className="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-semibold"
+                        className="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-semibold inline-flex items-center transition"
                       >
                         Saisir Notes
                       </button>
@@ -708,24 +795,41 @@ export const GradesView: React.FC = () => {
                     ← Retour à la liste de classe
                   </button>
                   <div className="flex items-center space-x-2 no-print">
+                    {pdfError && (
+                      <div className="flex items-center space-x-2 px-3 py-1.5 bg-rose-950/50 border border-rose-800 rounded-lg text-[10px] text-rose-200">
+                        <AlertCircle className="w-3.5 h-3.5" />
+                        <span>{pdfError}</span>
+                        <button 
+                          onClick={() => handleDownloadReportCard(selectedStudentForCard)}
+                          className="underline font-bold hover:text-white"
+                        >
+                          Réessayer
+                        </button>
+                      </div>
+                    )}
                     <button
-                      onClick={() =>
-                        downloadPdf(
-                          'printable-report-card-single',
-                          `Bulletin_${selectedStudentForCard.student.matricule || 'eleve'}_${reportCardData.term}.pdf`
-                        )
-                      }
-                      className="px-3.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-lg text-xs font-semibold flex items-center space-x-1.5 transition cursor-pointer"
+                      onClick={() => handleDownloadReportCard(selectedStudentForCard)}
+                      disabled={generatingPdf}
+                      className="px-3.5 py-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 border border-slate-700 rounded-lg text-xs font-semibold flex items-center space-x-1.5 transition cursor-pointer"
                       title="Télécharger en PDF"
                     >
-                      <Download className="w-3.5 h-3.5" />
-                      <span>Télécharger PDF</span>
+                      {generatingPdf ? (
+                        <>
+                          <div className="w-3.5 h-3.5 border-2 border-slate-400 border-t-transparent rounded-full animate-spin" />
+                          <span>Génération...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Download className="w-3.5 h-3.5" />
+                          <span>Télécharger PDF (Vecteur)</span>
+                        </>
+                      )}
                     </button>
                     <button
                       onClick={() =>
-                        printDocument(
-                          'printable-report-card-single',
-                          `Bulletin_${selectedStudentForCard.student.matricule}`
+                        printReportCardPdf(
+                          selectedStudentForCard,
+                          reportCardData.establishment
                         )
                       }
                       className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-semibold flex items-center space-x-1.5 shadow cursor-pointer"
@@ -805,7 +909,11 @@ export const GradesView: React.FC = () => {
                   </button>
 
                   <button
-                    onClick={() => printDocument(document.querySelector('.printable-document') || document.body, `Bulletins_Classe_${reportCardData.class?.name || 'classe'}`)}
+                    onClick={async () => {
+                      for (const r of (reportCardData.reports || [])) {
+                        await printReportCardPdf(r, reportCardData.establishment);
+                      }
+                    }}
                     className="w-full sm:w-auto px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl font-semibold flex items-center justify-center space-x-1.5 shadow cursor-pointer"
                   >
                     <Printer className="w-4 h-4" />
@@ -819,6 +927,46 @@ export const GradesView: React.FC = () => {
         </div>
       )}
 
+      {/* MODAL APERÇU ÉVALUATION */}
+      {activeEvalPreview && (
+        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-xs flex items-center justify-center p-4 z-50">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-4xl max-h-[90vh] flex flex-col shadow-2xl">
+            <div className="flex items-center justify-between p-4 border-b border-slate-800">
+              <h2 className="text-sm font-bold text-white flex items-center space-x-2">
+                <Eye className="w-5 h-5 text-sky-400" />
+                <span>Aperçu des notes : {activeEvalPreview.evaluation?.title}</span>
+              </h2>
+              <button onClick={() => setActiveEvalPreview(null)} className="text-slate-400 hover:text-white">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="p-4 overflow-y-auto">
+              <table className="w-full text-left text-xs text-slate-300">
+                <thead className="bg-slate-800/60 text-slate-400 uppercase tracking-wider text-[10px] border-b border-slate-800">
+                  <tr>
+                    <th className="p-3">Matricule</th>
+                    <th className="p-3">Nom & Prénoms</th>
+                    <th className="p-3 text-center">Note</th>
+                    <th className="p-3">Appréciation</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/60">
+                  {activeEvalPreview.students?.map((s: any, idx: number) => (
+                    <tr key={idx} className="hover:bg-slate-800/40">
+                      <td className="p-3 font-mono text-slate-400">{s.matricule || '—'}</td>
+                      <td className="p-3 font-semibold text-white">{s.last_name} {s.first_name}</td>
+                      <td className="p-3 text-center font-bold text-emerald-400">
+                        {s.is_absent ? 'ABSENT' : (s.score !== null ? `${s.score} / ${activeEvalPreview.evaluation?.max_score || 20}` : '—')}
+                      </td>
+                      <td className="p-3 text-slate-400">{s.remarks || '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

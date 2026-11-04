@@ -63,6 +63,7 @@ import {
   setEvaluation,
   listGrades,
   setGrade,
+  setBatchGrades,
   listStudentAttendances,
   setStudentAttendance,
   listTeacherCheckins,
@@ -98,6 +99,9 @@ import {
   deleteCurriculumProgramDoc,
   listStudentCourseAttendances,
   setStudentCourseAttendance,
+  setBatchStudentCourseAttendance,
+  setBatchStudentAttendances,
+  setBatchPayrollRecords,
   formatAcademicYearForMatricule,
   generateNextStudentMatricule,
 } from './firestore_db.ts';
@@ -1059,6 +1063,7 @@ api.post('/auth/change-password', authenticateToken, async (req: AuthenticatedRe
     await setTenantUser(req.user!.establishment_id, { 
       ...user, 
       password_hash: newHash, 
+      must_change_password: false,
       updated_at: new Date().toISOString() 
     });
 
@@ -1067,6 +1072,30 @@ api.post('/auth/change-password', authenticateToken, async (req: AuthenticatedRe
     res.json({ message: 'Mot de passe mis à jour avec succès.' });
   } catch (error: any) {
     res.status(500).json({ error: 'Erreur lors du changement de mot de passe.' });
+  }
+});
+
+api.post('/auth/force-change-password', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { newPassword } = req.body;
+    if (!newPassword || newPassword.length < 8) {
+      return res.status(400).json({ error: 'Le nouveau mot de passe doit comporter au moins 8 caractères.' });
+    }
+    const user = await getGlobalUser(req.user!.id) || await getSubcollectionDoc(req.user!.establishment_id, 'users', req.user!.id);
+    if (!user) return res.status(404).json({ error: 'Utilisateur introuvable.' });
+
+    const newHash = await hashPassword(newPassword);
+    await setTenantUser(req.user!.establishment_id, {
+      ...user,
+      password_hash: newHash,
+      must_change_password: false,
+      updated_at: new Date().toISOString()
+    });
+
+    logAudit(req.user!.establishment_id, req.user!.id, req.user!.full_name, 'PREMIERE_CONNEXION_CHANGEMENT_MDP', 'USER', req.user!.id);
+    res.json({ message: 'Mot de passe initialisé avec succès.' });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Erreur lors du changement de mot de passe.' });
   }
 });
 
@@ -1758,14 +1787,10 @@ api.get('/audit-logs', authenticateToken, requireRole(['PROMOTEUR', 'DIRECTEUR_G
 // 4. GESTION DES UTILISATEURS & PERSONNELS
 // ==========================================
 
-api.get('/users', authenticateToken, requireRole(['PROMOTEUR', 'DIRECTEUR_GENERAL', 'DIRECTEUR_ETUDES']), async (req: AuthenticatedRequest, res: Response) => {
+api.get('/users', authenticateToken, requireRole(['PROMOTEUR', 'DIRECTEUR_GENERAL', 'DIRECTEUR_ETUDES', 'COMPTABLE']), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const estId = req.user!.establishment_id;
-    let users = await listSubcollectionDocs<any>(estId, 'users');
-    if (!users || users.length === 0) {
-      const rootUsers = await listDocs<any>('users');
-      users = (rootUsers || []).filter((u: any) => u.establishment_id === estId);
-    }
+    let users = await listTenantUsers(estId);
 
     if (req.user!.role === 'DIRECTEUR_ETUDES') {
       users = (users || []).filter((u: any) => u.role === 'ENSEIGNANT');
@@ -3374,6 +3399,62 @@ api.post('/academic/repair-parent-student-links', authenticateToken, requireRole
   }
 });
 
+// ==========================================
+// 6.b. CARTES SCOLAIRES & HISTORIQUE DES DUPLICATAS
+// ==========================================
+
+api.get('/student-cards', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const estId = req.user!.establishment_id;
+    const cards = await listTenantDocs<any>(estId, 'school_id_cards');
+    res.json(cards);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Erreur lors de la récupération des cartes scolaires.' });
+  }
+});
+
+api.post('/student-cards/issue', authenticateToken, requireRole(['PROMOTEUR', 'DIRECTEUR_GENERAL', 'DIRECTEUR_ETUDES', 'GESTIONNAIRE']), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const estId = req.user!.establishment_id;
+    const { studentId } = req.body;
+    if (!studentId) return res.status(400).json({ error: 'ID de l\'élève requis.' });
+
+    const student = await getStudent(estId, studentId);
+    if (!student || student.establishment_id !== estId) {
+      return res.status(404).json({ error: 'Élève introuvable.' });
+    }
+
+    const cardId = `CARD-${studentId}-${Date.now().toString(36).toUpperCase()}`;
+    const cardRecord = {
+      id: cardId,
+      establishment_id: estId,
+      student_id: studentId,
+      matricule: student.matricule,
+      student_name: `${student.last_name} ${student.first_name}`,
+      issued_by_id: req.user!.id,
+      issued_by_name: req.user!.full_name,
+      issued_at: new Date().toISOString(),
+      duplicate_count: 1
+    };
+
+    const existingCards = await listTenantDocs<any>(estId, 'school_id_cards');
+    const existing = existingCards.find((c: any) => c.student_id === studentId);
+    if (existing) {
+      cardRecord.duplicate_count = (existing.duplicate_count || 1) + 1;
+    }
+
+    await setDocData(`establishments/${estId}/school_id_cards`, studentId, cardRecord);
+    logAudit(estId, req.user!.id, req.user!.full_name, 'DELIVRANCE_CARTE_SCOLAIRE', 'STUDENT', studentId, {
+      matricule: student.matricule,
+      duplicateCount: cardRecord.duplicate_count
+    });
+
+    res.json({ message: 'Carte scolaire délivrée avec succès.', cardRecord });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || 'Erreur lors de la délivrance de la carte.' });
+  }
+});
+
 export interface MatriculeMigrationReportItem {
   studentId: string;
   studentName: string;
@@ -4339,7 +4420,7 @@ api.post('/evaluations', authenticateToken, requireRole(['PROMOTEUR', 'DIRECTEUR
       created_by: req.user!.id,
       created_at: new Date().toISOString(),
     };
-    await setEvaluation(req.user!.establishment_id, evalPayload);
+    await setEvaluation(req.user!.establishment_id, id, evalPayload);
 
     logAudit(req.user!.establishment_id, req.user!.id, req.user!.full_name, 'CREATION_EVALUATION', 'EVALUATION', id, {
       title,
@@ -4415,9 +4496,8 @@ api.post('/evaluations/:id/grades', authenticateToken, async (req: Authenticated
     const { grades } = req.body; // array of { studentId, score, isAbsent, remarks }
     const estId = req.user!.establishment_id;
 
-    const [allEvals, allGrades] = await Promise.all([
+    const [allEvals] = await Promise.all([
       listEvaluations(estId),
-      listGrades(estId),
     ]);
 
     const evalItem = (allEvals || []).find((e: any) => e.id === req.params.id);
@@ -4431,17 +4511,37 @@ api.post('/evaluations/:id/grades', authenticateToken, async (req: Authenticated
       return res.status(400).json({ error: 'Format de notes invalide.' });
     }
 
+    const batchItems: { id: string; data: any }[] = [];
+
     for (const g of grades) {
-      const score = g.isAbsent ? null : (g.score !== undefined && g.score !== null && g.score !== '' ? Number(g.score) : null);
-      const isAbsent = g.isAbsent ? 1 : 0;
+      if (!g || !g.studentId) continue;
+
+      let score: number | null = null;
+      let isAbsent = g.isAbsent ? 1 : 0;
+
+      if (!isAbsent) {
+        if (g.score !== undefined && g.score !== null && String(g.score).trim() !== '') {
+          const parsed = Number(g.score);
+          score = isNaN(parsed) ? null : parsed;
+        }
+      }
+
       const remarks = g.remarks || null;
 
-      const existingGrade = (allGrades || []).find((gr: any) => gr.evaluation_id === evalItem.id && gr.student_id === g.studentId);
-      const targetGradeId = existingGrade?.id || `GRD-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 6)}`;
+      // Unique document ID per (establishment, class, subject, evaluation, student)
+      const cleanEstId = (estId || 'est-default').replace(/[^a-zA-Z0-9_-]/g, '_');
+      const cleanClassId = (evalItem.class_id || 'cls').replace(/[^a-zA-Z0-9_-]/g, '_');
+      const cleanSubjectId = (evalItem.subject_id || 'sub').replace(/[^a-zA-Z0-9_-]/g, '_');
+      const cleanEvalId = (evalItem.id || 'eval').replace(/[^a-zA-Z0-9_-]/g, '_');
+      const cleanStudentId = String(g.studentId).replace(/[^a-zA-Z0-9_-]/g, '_');
 
-      await setGrade(estId, {
+      const targetGradeId = `GRD_${cleanEstId}_${cleanClassId}_${cleanSubjectId}_${cleanEvalId}_${cleanStudentId}`;
+
+      const gradeData = {
         id: targetGradeId,
         establishment_id: estId,
+        class_id: evalItem.class_id,
+        subject_id: evalItem.subject_id,
         evaluation_id: evalItem.id,
         student_id: g.studentId,
         score,
@@ -4449,18 +4549,26 @@ api.post('/evaluations/:id/grades', authenticateToken, async (req: Authenticated
         remarks,
         updated_by: req.user!.id,
         updated_at: new Date().toISOString(),
-      });
+      };
+
+      batchItems.push({ id: targetGradeId, data: gradeData });
+    }
+
+    if (batchItems.length > 0) {
+      await setBatchGrades(estId, batchItems);
     }
 
     logAudit(estId, req.user!.id, req.user!.full_name, 'SAISIE_NOTES', 'EVALUATION', evalItem.id, {
-      count: grades.length,
+      count: batchItems.length,
     });
 
-    res.json({ message: 'Notes enregistrées avec succès.' });
+    res.json({ message: 'Notes enregistrées avec succès.', savedCount: batchItems.length });
   } catch (error: any) {
     res.status(500).json({ error: error.message || 'Erreur lors de la sauvegarde des notes.' });
   }
 });
+
+
 
 api.post('/evaluations/:id/lock', authenticateToken, requireRole(['DIRECTEUR_ETUDES', 'PROMOTEUR', 'DIRECTEUR_GENERAL']), async (req: AuthenticatedRequest, res: Response) => {
   try {
@@ -4762,6 +4870,8 @@ api.post('/attendance', authenticateToken, requireRole(['SURVEILLANT', 'DIRECTEU
 
     const existingAttendances = await listStudentAttendances(req.user!.establishment_id).catch(() => []);
     const attMap = new Map((existingAttendances || []).filter((a: any) => a.date === date).map((a: any) => [a.student_id, a]));
+    const batchItems: { id: string; data: any }[] = [];
+    const estId = req.user!.establishment_id;
 
     for (const r of records) {
       const studentId = r.studentId || r.student_id;
@@ -4774,12 +4884,16 @@ api.post('/attendance', authenticateToken, requireRole(['SURVEILLANT', 'DIRECTEU
       const justificationReason = r.justificationReason !== undefined ? r.justificationReason : (r.justification_reason || null);
 
       const existing = attMap.get(studentId);
-      const targetId = existing?.id || `ATT-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 6)}`;
-      const op = existing ? 'UPDATE' : 'CREATE';
+      const cleanEstId = (estId || 'est').replace(/[^a-zA-Z0-9_-]/g, '_');
+      const cleanClassId = String(classId).replace(/[^a-zA-Z0-9_-]/g, '_');
+      const cleanDate = String(date).replace(/[^a-zA-Z0-9_-]/g, '_');
+      const cleanStudentId = String(studentId).replace(/[^a-zA-Z0-9_-]/g, '_');
+
+      const targetId = existing?.id || `ATT_${cleanEstId}_${cleanClassId}_${cleanDate}_${cleanStudentId}`;
 
       const attPayload = {
         id: targetId,
-        establishment_id: req.user!.establishment_id,
+        establishment_id: estId,
         student_id: studentId,
         class_id: classId,
         date,
@@ -4792,17 +4906,14 @@ api.post('/attendance', authenticateToken, requireRole(['SURVEILLANT', 'DIRECTEU
         updated_at: new Date().toISOString(),
       };
 
-      await executeDualWrite({
-        establishmentId: req.user!.establishment_id,
-        collectionPath: `establishments/${req.user!.establishment_id}/student_attendances`,
-        docId: targetId,
-        operation: op,
-        payload: attPayload,
-        sqliteWriter: () => {}
-      });
+      batchItems.push({ id: targetId, data: attPayload });
     }
 
-    res.json({ message: 'Appel journalier enregistré avec succès.' });
+    if (batchItems.length > 0) {
+      await setBatchStudentAttendances(estId, batchItems);
+    }
+
+    res.json({ message: 'Appel journalier enregistré avec succès.', count: batchItems.length });
   } catch (error: any) {
     console.error('Erreur enregistrement appel:', error);
     res.status(500).json({ error: error.message || 'Erreur lors de l’enregistrement de l’appel.' });
@@ -4924,6 +5035,10 @@ api.post('/attendance/course-rollcall', authenticateToken, requireRole(['ENSEIGN
 
       await setStudentCourseAttendance(estId, docKey, payload);
       savedRecords.push(payload);
+    }
+
+    if (savedRecords.length > 0) {
+      await setBatchStudentCourseAttendance(estId, savedRecords.map(r => ({ id: r.id, data: r })));
     }
 
     logAudit(estId, req.user!.id, req.user!.full_name, 'APPEL_COURS_ELEVES', 'STUDENT_COURSE_ATTENDANCE', classId, {
@@ -6747,7 +6862,7 @@ api.get('/dashboard/stats', authenticateToken, async (req: AuthenticatedRequest,
 
 // --- PARAMÈTRES DE RÉMUNÉRATION (RÉSERVÉ AU PROMOTEUR) ---
 
-api.get('/staff-salary-parameters', authenticateToken, requireRole(['PROMOTEUR']), async (req: AuthenticatedRequest, res: Response) => {
+api.get('/staff-salary-parameters', authenticateToken, requireRole(['PROMOTEUR', 'COMPTABLE']), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const estId = req.user!.establishment_id;
     const [users, params] = await Promise.all([
@@ -6919,6 +7034,7 @@ api.post('/finance/payroll/auto-calculate', authenticateToken, requireRole(['COM
 
     let calculatedCount = 0;
     const unconfiguredStaff: string[] = [];
+    const batchPayrollItems: { id: string; data: any }[] = [];
 
     for (const staff of eligibleStaff) {
       const sp = paramsMap.get(staff.id);
@@ -7026,7 +7142,11 @@ api.post('/finance/payroll/auto-calculate', authenticateToken, requireRole(['COM
       const gross = base + bonuses + overtimeAmount;
       const net = Math.max(0, gross - deductions - advances);
 
-      const id = existingSlip?.id || `PR-${period.replace('-', '')}-${staff.id.slice(-4)}-${Date.now().toString(36).slice(-4).toUpperCase()}`;
+      const cleanEstId = (estId || 'est').replace(/[^a-zA-Z0-9_-]/g, '_');
+      const cleanPeriod = String(period).replace(/[^a-zA-Z0-9_-]/g, '_');
+      const cleanStaffId = String(staff.id).replace(/[^a-zA-Z0-9_-]/g, '_');
+
+      const id = existingSlip?.id || `PAY_${cleanEstId}_${cleanPeriod}_${cleanStaffId}`;
 
       const payrollPayload = {
         id,
@@ -7061,8 +7181,12 @@ api.post('/finance/payroll/auto-calculate', authenticateToken, requireRole(['COM
         updated_at: new Date().toISOString(),
       };
 
-      await setDocData(`establishments/${estId}/payroll_records`, id, payrollPayload);
+      batchPayrollItems.push({ id, data: payrollPayload });
       calculatedCount++;
+    }
+
+    if (batchPayrollItems.length > 0) {
+      await setBatchPayrollRecords(estId, batchPayrollItems);
     }
 
     logAudit(estId, req.user!.id, req.user!.full_name, 'CALCUL_AUTOMATIQUE_PAIE', 'PAYROLL', period, {

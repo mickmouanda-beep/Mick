@@ -2,7 +2,7 @@ import React, { useEffect } from 'react';
 import { PayrollRecord, Establishment } from '../types.ts';
 import { Printer, ShieldCheck, Download } from 'lucide-react';
 import { CloseButton } from './CloseButton.tsx';
-import { printDocument, downloadPdf } from '../utils/printPdfUtils.ts';
+import { printPayslipPdf, downloadPayslipPdf } from '../utils/printPdfUtils.ts';
 import { CustomizablePayslip } from './documents/CustomizablePayslip.tsx';
 
 interface PrintablePayslipProps {
@@ -12,6 +12,9 @@ interface PrintablePayslipProps {
 }
 
 export const PrintablePayslip: React.FC<PrintablePayslipProps> = ({ record, establishment, onClose }) => {
+  const [generatingPdf, setGeneratingPdf] = React.useState(false);
+  const [pdfError, setPdfError] = React.useState<string | null>(null);
+
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape' && onClose) onClose();
@@ -28,14 +31,20 @@ export const PrintablePayslip: React.FC<PrintablePayslipProps> = ({ record, esta
     };
   }, [onClose]);
 
-  const handlePrint = () => {
-    const safeName = record.full_name || record.user_id || 'salarie';
-    printDocument('printable-payslip-doc', `Bulletin_Paie_${safeName}`);
+  const handlePrint = async () => {
+    await printPayslipPdf(record, establishment);
   };
 
-  const handleDownloadPdf = () => {
-    const safeName = (record.full_name || record.user_id || 'salarie').replace(/\s+/g, '_');
-    downloadPdf('printable-payslip-doc', `Bulletin_Paie_${safeName}_${record.period || 'periode'}.pdf`);
+  const handleDownloadPdf = async () => {
+    setGeneratingPdf(true);
+    setPdfError(null);
+    try {
+      await downloadPayslipPdf(record, establishment);
+    } catch (err: any) {
+      setPdfError(err.message || "Erreur PDF.");
+    } finally {
+      setGeneratingPdf(false);
+    }
   };
 
   return (
@@ -51,11 +60,16 @@ export const PrintablePayslip: React.FC<PrintablePayslipProps> = ({ record, esta
           <div className="flex items-center space-x-2">
             <button
               onClick={handleDownloadPdf}
-              className="flex items-center space-x-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 px-3.5 py-2 rounded-xl text-xs font-semibold transition-all cursor-pointer"
+              disabled={generatingPdf}
+              className="flex items-center space-x-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 border border-slate-700 px-3.5 py-2 rounded-xl text-xs font-semibold transition-all cursor-pointer"
               title="Télécharger en PDF"
             >
-              <Download className="w-4 h-4 text-slate-300" />
-              <span>Télécharger PDF</span>
+              {generatingPdf ? (
+                <div className="w-4 h-4 border-2 border-slate-400 border-t-transparent rounded-full animate-spin" />
+              ) : (
+                <Download className="w-4 h-4 text-slate-300" />
+              )}
+              <span>{generatingPdf ? 'Génération...' : 'Télécharger PDF'}</span>
             </button>
             <button
               onClick={handlePrint}

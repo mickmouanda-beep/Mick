@@ -31,7 +31,7 @@ import { api } from '../lib/api.ts';
 import { useAuth } from '../context/AuthContext.tsx';
 import { SchoolClass, DisciplinaryIncident, Student, TeacherAttendance, Complaint, Subject, StaffAttendanceRules } from '../types.ts';
 import { PrintHeader } from '../components/PrintHeader.tsx';
-import { printDocument, downloadPdf } from '../utils/printPdfUtils.ts';
+import { printDocument, downloadAttendancePdf, downloadPdf } from '../utils/printPdfUtils.ts';
 import { CustomizableAttendanceSheet } from '../components/documents/CustomizableAttendanceSheet.tsx';
 
 export const AttendanceView: React.FC = () => {
@@ -56,6 +56,8 @@ export const AttendanceView: React.FC = () => {
   const [justifReviewNote, setJustifReviewNote] = useState('');
   const [justifReviewLoading, setJustifReviewLoading] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [generatingPdf, setGeneratingPdf] = useState(false);
+  const [pdfError, setPdfError] = useState<string | null>(null);
 
   // Course Rollcall & Alerts States
   const [courseSchedules, setCourseSchedules] = useState<any[]>([]);
@@ -474,6 +476,20 @@ export const AttendanceView: React.FC = () => {
     );
   };
 
+  const handleDownloadAttendance = async () => {
+    if (!selectedClassId || attendanceRecords.length === 0) return;
+    setGeneratingPdf(true);
+    setPdfError(null);
+    try {
+      const className = classes.find(c => c.id === selectedClassId)?.name || 'Classe';
+      await downloadAttendancePdf(attendanceRecords, establishment, className, selectedDate);
+    } catch (err: any) {
+      setPdfError(err.message || "Erreur PDF.");
+    } finally {
+      setGeneratingPdf(false);
+    }
+  };
+
   const handleSaveCourseAttendance = async () => {
     if (!selectedClassId || !selectedDate) return;
     setError(null);
@@ -871,6 +887,12 @@ export const AttendanceView: React.FC = () => {
                 </div>
 
                 <div className="flex items-center space-x-3 w-full sm:w-auto justify-end">
+                  {pdfError && (
+                    <div className="flex items-center space-x-2 px-3 py-1.5 bg-rose-950/50 border border-rose-800 rounded-lg text-[10px] text-rose-200">
+                      <span>{pdfError}</span>
+                      <button onClick={handleDownloadAttendance} className="underline font-bold">Réessayer</button>
+                    </div>
+                  )}
                   <div className="flex items-center space-x-2 font-mono">
                     <span className="text-emerald-400 font-bold">{presentCount} Présents</span>
                     <span className="text-slate-600">•</span>
@@ -879,6 +901,39 @@ export const AttendanceView: React.FC = () => {
                     <span className="text-amber-400 font-bold">{lateCount} Retards</span>
                   </div>
 
+                  <button
+                    type="button"
+                    disabled={generatingPdf}
+                    onClick={handleDownloadAttendance}
+                    className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 border border-slate-700 font-semibold rounded-lg transition flex items-center space-x-1.5 cursor-pointer text-xs"
+                    title="Télécharger la feuille d'émargement en PDF"
+                  >
+                    {generatingPdf ? (
+                      <div className="w-3.5 h-3.5 border-2 border-slate-400 border-t-transparent rounded-full animate-spin" />
+                    ) : (
+                      <Download className="w-3.5 h-3.5 text-indigo-400" />
+                    )}
+                    <span>{generatingPdf ? 'Génération...' : 'Exporter PDF'}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => handleDownloadAttendance()}
+                    className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-emerald-400 border border-slate-700 font-semibold rounded-lg transition flex items-center space-x-1.5 cursor-pointer text-xs"
+                    title="Télécharger la liste en PDF"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>PDF</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleDownloadAttendance()}
+                    className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-indigo-400 border border-slate-700 font-semibold rounded-lg transition flex items-center space-x-1.5 cursor-pointer text-xs"
+                    title="Imprimer la liste"
+                  >
+                    <Printer className="w-3.5 h-3.5" />
+                    <span>Imprimer</span>
+                  </button>
                   <button
                     type="button"
                     onClick={() => setShowPrintSheetModal(true)}

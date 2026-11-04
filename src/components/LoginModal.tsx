@@ -78,6 +78,16 @@ export const LoginModal: React.FC<LoginModalProps> = ({ onSuccess }) => {
     fetchBootstrapStatus();
   }, []);
 
+  // Reset form fields on mount (e.g. after logout)
+  useEffect(() => {
+    setUsername('');
+    setPassword('');
+    setEstablishmentCode('');
+    setError(null);
+    setDevUsername('');
+    setDevPassword('');
+  }, [activeView]);
+
   // Register New School State (Promoteur)
   const [regLoading, setRegLoading] = useState(false);
   const [codeCheckStatus, setCodeCheckStatus] = useState<'idle' | 'checking' | 'available' | 'taken'>('idle');
@@ -487,8 +497,9 @@ export const LoginModal: React.FC<LoginModalProps> = ({ onSuccess }) => {
           )}
 
           {/* VUE 1 : FORMULAIRE DE CONNEXION PRINCIPAL */}
-          {activeView === 'login' && (
-            <form onSubmit={handleSubmit} className="space-y-3.5">
+          {activeView === 'login' && !schoolOptions && (
+            <>
+              <form onSubmit={handleSubmit} className="space-y-3.5" autoComplete="off">
               {/* Champ 1 : Code d'établissement (Obligatoire) */}
               <div className="relative">
                 <div className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-4 py-3 flex items-center space-x-3 text-slate-800 focus-within:ring-2 focus-within:ring-blue-600 focus-within:border-blue-600 focus-within:bg-white transition-all shadow-xs">
@@ -497,6 +508,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({ onSuccess }) => {
                     type="text"
                     required
                     autoFocus
+                    autoComplete="off"
                     placeholder="Code d’établissement * (ex: ECOLE1)"
                     value={establishmentCode}
                     onChange={(e) => setEstablishmentCode(e.target.value.toUpperCase())}
@@ -512,6 +524,9 @@ export const LoginModal: React.FC<LoginModalProps> = ({ onSuccess }) => {
                   <input
                     type="text"
                     required
+                    autoComplete="off"
+                    name="eco_ges_login_user_id"
+                    id="eco_ges_login_user_id"
                     placeholder="Identifiant, matricule ou téléphone *"
                     value={username}
                     onChange={(e) => setUsername(e.target.value)}
@@ -537,6 +552,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({ onSuccess }) => {
                   <input
                     type={showPassword ? 'text' : 'password'}
                     required
+                    autoComplete="new-password"
                     placeholder="Mot de passe *"
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
@@ -570,7 +586,11 @@ export const LoginModal: React.FC<LoginModalProps> = ({ onSuccess }) => {
               </button>
 
             </form>
-          )}
+            <p className="text-[10px] text-slate-400 text-center mt-2 px-4">
+              Sur un ordinateur partagé, ne sauvegardez pas votre mot de passe dans le navigateur.
+            </p>
+          </>
+        )}
 
           {/* VUE 1.1 : SÉLECTION D'ÉTABLISSEMENT SI MULTI-ÉCOLES */}
           {activeView === 'login' && schoolOptions && (
@@ -735,7 +755,8 @@ export const LoginModal: React.FC<LoginModalProps> = ({ onSuccess }) => {
                 </form>
               ) : (
                 /* Formulaire de Connexion Direct Gestionnaire d'application */
-                <form onSubmit={handleDevLogin} className="space-y-3.5">
+            <div>
+                <form onSubmit={handleDevLogin} className="space-y-3.5" autoComplete="off">
                   <div className="relative">
                     <div className="w-full bg-slate-50 border border-slate-200 rounded-2xl px-4 py-3 flex items-center space-x-3 text-slate-800 focus-within:ring-2 focus-within:ring-blue-600 focus-within:border-blue-600 focus-within:bg-white transition-all shadow-xs">
                       <User className="w-5 h-5 text-blue-600 shrink-0" />
@@ -746,6 +767,9 @@ export const LoginModal: React.FC<LoginModalProps> = ({ onSuccess }) => {
                         value={devUsername}
                         onChange={(e) => setDevUsername(e.target.value)}
                         className="w-full bg-transparent text-sm text-slate-900 placeholder-slate-400 font-medium focus:outline-none font-mono"
+                        autoComplete="off"
+                        name="eco_ges_mgmt_admin_id"
+                        id="eco_ges_mgmt_admin_id"
                       />
                     </div>
                   </div>
@@ -760,6 +784,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({ onSuccess }) => {
                         value={devPassword}
                         onChange={(e) => setDevPassword(e.target.value)}
                         className="w-full bg-transparent text-sm text-slate-900 placeholder-slate-400 font-medium focus:outline-none"
+                        autoComplete="new-password"
                       />
                       <button
                         type="button"
@@ -788,11 +813,13 @@ export const LoginModal: React.FC<LoginModalProps> = ({ onSuccess }) => {
                     )}
                   </button>
                 </form>
-              )}
-
-
-            </div>
-          )}
+                <p className="text-[10px] text-slate-400 text-center mt-2 px-4">
+                  Sur un ordinateur partagé, ne sauvegardez pas votre mot de passe dans le navigateur.
+                </p>
+              </div>
+            )}
+          </div>
+        )}
 
           {/* VUE 3 : INSCRIRE UN NOUVEL ÉTABLISSEMENT AVEC CODE D'AUTORISATION */}
           {activeView === 'register' && (

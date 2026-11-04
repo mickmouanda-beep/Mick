@@ -23,11 +23,14 @@ import { DeveloperView } from './views/DeveloperView.tsx';
 import { TimetableView } from './views/TimetableView.tsx';
 import { CurriculumProgramsView } from './views/CurriculumProgramsView.tsx';
 import { ExamDossiersView } from './views/ExamDossiersView.tsx';
+import { ProfileView } from './views/ProfileView.tsx';
+import { StudentCardsView } from './views/StudentCardsView.tsx';
+import { MustChangePasswordModal } from './components/MustChangePasswordModal.tsx';
 import { GraduationCap, AlertTriangle } from 'lucide-react';
 import { api } from './lib/api.ts';
 
 const MainApp: React.FC = () => {
-  const { isSystemInitialized, isAuthenticated, isLoading, user } = useAuth();
+  const { isSystemInitialized, isAuthenticated, isLoading, user, refreshUser } = useAuth();
   const [currentTab, setCurrentTab] = useState<ActiveTab>('dashboard');
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
 
@@ -164,10 +167,16 @@ const MainApp: React.FC = () => {
           {currentTab === 'contracts-salaries' && <ContractsSalariesView />}
           {currentTab === 'decisions' && <DecisionsView />}
           {currentTab === 'admin' && <AdministrationView />}
+          {currentTab === 'student-cards' && <StudentCardsView />}
+          {currentTab === 'profile' && <ProfileView />}
           {currentTab === 'commercial' && <DashboardView onNavigate={setCurrentTab} />}
           {currentTab === 'developer' && <DashboardView onNavigate={setCurrentTab} />}
         </main>
       </div>
+
+      {user?.must_change_password && (
+        <MustChangePasswordModal onSuccess={refreshUser} />
+      )}
     </div>
   );
 };

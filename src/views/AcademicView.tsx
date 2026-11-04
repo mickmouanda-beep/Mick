@@ -25,7 +25,7 @@ import { api } from '../lib/api.ts';
 import { useAuth } from '../context/AuthContext.tsx';
 import { SchoolClass, Subject, ClassSubject, User } from '../types.ts';
 import { OFFICIAL_CYCLES, OFFICIAL_LYCEE_SERIES, CONGO_SERIES_CATALOG, DetailedSerieRef, CONGO_COLLEGE_CATALOG, CollegeClassRef } from '../constants.ts';
-import { printDocument, downloadPdf } from '../utils/printPdfUtils.ts';
+import { printDocument, downloadListPdf, downloadPdf } from '../utils/printPdfUtils.ts';
 import { PrintHeader } from '../components/PrintHeader.tsx';
 
 const DAYS_OF_WEEK = [
@@ -97,6 +97,8 @@ export const AcademicView: React.FC = () => {
 
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const [generatingPdf, setGeneratingPdf] = useState(false);
+  const [pdfError, setPdfError] = useState<string | null>(null);
 
   const canManage = hasRole(['PROMOTEUR', 'DIRECTEUR_GENERAL', 'DIRECTEUR_ETUDES']);
 
@@ -313,6 +315,29 @@ export const AcademicView: React.FC = () => {
     }
   };
 
+  const handleExportClasses = async () => {
+    if (classes.length === 0) return;
+    setGeneratingPdf(true);
+    setPdfError(null);
+    try {
+      const data = classes.map(c => [
+        c.name,
+        c.cycle_code,
+        c.level_code,
+        c.serie_code || '-',
+        c.main_teacher_name || '-',
+        `${c.student_count || 0}/${c.capacity}`,
+        c.room || '-'
+      ]);
+      const columns = ['CLASSE', 'CYCLE', 'NIVEAU', 'SÉRIE', 'PP', 'EFFECTIF', 'SALLE'];
+      await downloadListPdf("Répertoire des Classes Ouvertes", columns, data, establishment);
+    } catch (err: any) {
+      setPdfError(err.message || "Erreur PDF.");
+    } finally {
+      setGeneratingPdf(false);
+    }
+  };
+
   const handleImportRef = async (refCode?: string, cycleCode: 'LYCEE' | 'COLLEGE' = 'LYCEE') => {
     setError(null);
     setSuccess(null);
@@ -346,6 +371,18 @@ export const AcademicView: React.FC = () => {
 
         {canManage && (
           <div className="flex items-center space-x-2">
+            <button
+              onClick={handleExportClasses}
+              disabled={generatingPdf}
+              className="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 border border-slate-700 rounded-xl text-xs font-semibold flex items-center space-x-1.5 transition"
+            >
+              {generatingPdf ? (
+                <div className="w-3.5 h-3.5 border-2 border-slate-400 border-t-transparent rounded-full animate-spin" />
+              ) : (
+                <Download className="w-3.5 h-3.5 text-emerald-400" />
+              )}
+              <span>Exporter Liste</span>
+            </button>
             <button
               onClick={() => setShowSubjectModal(true)}
               className="px-3.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-xl text-xs font-semibold flex items-center space-x-1.5 transition"

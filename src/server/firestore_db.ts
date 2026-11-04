@@ -446,21 +446,71 @@ export async function listFundInjections(establishmentId: string) {
   return Array.from(map.values());
 }
 
+
+
+export async function setTenantDoc(estId: string, collectionName: string, id: string, data: any): Promise<boolean> {
+  if (!estId || typeof estId !== 'string' || estId.trim() === '') {
+    throw new Error(`[Firestore] establishment_id invalide ou manquant pour ${collectionName}`);
+  }
+  if (!id || typeof id !== 'string' || id === estId || id.trim() === '') {
+    throw new Error(`[Firestore] ID de document invalide, manquant ou confondu avec estId ("${id}") pour la collection ${collectionName}`);
+  }
+  const path = `establishments/${estId}/${collectionName}`;
+  const payload = {
+    ...data,
+    id,
+    establishment_id: estId,
+    updated_at: new Date().toISOString(),
+  };
+  return setDocData(path, id, payload);
+}
+
+export async function setBatchTenantDocs(establishmentId: string, collectionName: string, items: { id: string; data: any }[]) {
+  if (!establishmentId || typeof establishmentId !== 'string' || establishmentId.trim() === '') {
+    throw new Error(`[Firestore] establishment_id requis pour le batch ${collectionName}`);
+  }
+  if (!items || items.length === 0) return true;
+  try {
+    const batch = db.batch();
+    for (const item of items) {
+      if (!item.id || item.id === establishmentId || !item.data || typeof item.id !== 'string' || item.id.trim() === '') {
+        throw new Error(`[Firestore] ID de document invalide dans le batch ${collectionName}: "${item?.id}"`);
+      }
+      const ref = db.collection(`establishments/${establishmentId}/${collectionName}`).doc(item.id);
+      const payload = {
+        ...item.data,
+        id: item.id,
+        establishment_id: establishmentId,
+        updated_at: new Date().toISOString(),
+      };
+      batch.set(ref, payload, { merge: true });
+    }
+    await batch.commit();
+    return true;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, `establishments/${establishmentId}/${collectionName}/batch`);
+  }
+}
+
 // 6. Evaluations & Grades
 export async function listEvaluations(establishmentId: string) {
   return listTenantDocs<any>(establishmentId, 'evaluations');
 }
 
-export async function setEvaluation(id: string, data: any) {
-  return setDocData('evaluations', id, data);
+export async function setEvaluation(estId: string, id: string, data: any) {
+  return setTenantDoc(estId, 'evaluations', id, data);
 }
 
 export async function listGrades(establishmentId: string) {
   return listTenantDocs<any>(establishmentId, 'grades');
 }
 
-export async function setGrade(id: string, data: any) {
-  return setDocData('grades', id, data);
+export async function setGrade(estId: string, id: string, data: any) {
+  return setTenantDoc(estId, 'grades', id, data);
+}
+
+export async function setBatchGrades(establishmentId: string, gradesDataList: { id: string; data: any }[]) {
+  return setBatchTenantDocs(establishmentId, 'grades', gradesDataList);
 }
 
 // 7. Attendance, Course Logs, Schedules & Payroll
@@ -473,18 +523,23 @@ export async function listStudentCourseAttendances(establishmentId: string) {
 }
 
 export async function setStudentCourseAttendance(establishmentId: string, id: string, data: any) {
-  if (establishmentId && id) {
-    await setDocData(`establishments/${establishmentId}/student_course_attendances`, id, data);
-  }
-  return setDocData('student_course_attendances', id, data);
+  return setTenantDoc(establishmentId, 'student_course_attendances', id, data);
+}
+
+export async function setBatchStudentCourseAttendance(establishmentId: string, items: { id: string; data: any }[]) {
+  return setBatchTenantDocs(establishmentId, 'student_course_attendances', items);
 }
 
 export async function listStudentSessionAttendances(establishmentId: string) {
   return listTenantDocs<any>(establishmentId, 'student_session_attendances');
 }
 
-export async function setStudentAttendance(id: string, data: any) {
-  return setDocData('student_attendances', id, data);
+export async function setStudentAttendance(estId: string, id: string, data: any) {
+  return setTenantDoc(estId, 'student_attendances', id, data);
+}
+
+export async function setBatchStudentAttendances(establishmentId: string, items: { id: string; data: any }[]) {
+  return setBatchTenantDocs(establishmentId, 'student_attendances', items);
 }
 
 export async function listTeacherCheckins(establishmentId: string) {
@@ -495,8 +550,12 @@ export async function listPayrollRecords(establishmentId: string) {
   return listTenantDocs<any>(establishmentId, 'payroll_records');
 }
 
-export async function setPayrollRecord(id: string, data: any) {
-  return setDocData('payroll_records', id, data);
+export async function setPayrollRecord(estId: string, id: string, data: any) {
+  return setTenantDoc(estId, 'payroll_records', id, data);
+}
+
+export async function setBatchPayrollRecords(establishmentId: string, items: { id: string; data: any }[]) {
+  return setBatchTenantDocs(establishmentId, 'payroll_records', items);
 }
 
 export async function listLessonLogs(establishmentId: string) {

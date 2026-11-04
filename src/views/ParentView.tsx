@@ -25,9 +25,9 @@ import {
 import { api } from '../lib/api.ts';
 import { useAuth } from '../context/AuthContext.tsx';
 import { StudentView } from './StudentView.tsx';
-import { SchoolAnnouncement } from '../types.ts';
 import { PrintHeader } from '../components/PrintHeader.tsx';
-import { printDocument, downloadPdf } from '../utils/printPdfUtils.ts';
+import { printDocument, downloadPdf, printStudentStatementPdf, downloadStudentStatementPdf } from '../utils/printPdfUtils.ts';
+import { SchoolAnnouncement } from '../types.ts';
 
 export const ParentView: React.FC = () => {
   const { user, establishment } = useAuth();
@@ -288,7 +288,23 @@ export const ParentView: React.FC = () => {
                   <span>Prochaine échéance : Tranche 2 avant le 10 Janvier 2027</span>
                   <div className="flex items-center space-x-2 no-print">
                     <button
-                      onClick={() => printDocument(`printable-parent-finance-${ch.id}`, `Etat_Versements_${ch.matricule}`)}
+                      onClick={() =>
+                        printStudentStatementPdf(
+                          {
+                            first_name: ch.first_name,
+                            last_name: ch.last_name,
+                            matricule: ch.matricule,
+                            class_name: ch.class_name,
+                          },
+                          ch.financials?.payments || [],
+                          {
+                            total_due: ch.financials?.totalDue || 0,
+                            total_paid: ch.financials?.totalPaid || 0,
+                            balance: ch.financials?.balance ?? 0,
+                          },
+                          establishment
+                        )
+                      }
                       className="text-slate-300 hover:text-white font-semibold flex items-center space-x-1 cursor-pointer bg-slate-800 border border-slate-700 px-2.5 py-1 rounded-lg text-xs"
                       title="Imprimer l'état des versements"
                     >
@@ -296,7 +312,23 @@ export const ParentView: React.FC = () => {
                       <span>Imprimer</span>
                     </button>
                     <button
-                      onClick={() => downloadPdf(`printable-parent-finance-${ch.id}`, `Etat_Versements_${ch.matricule}.pdf`)}
+                      onClick={() =>
+                        downloadStudentStatementPdf(
+                          {
+                            first_name: ch.first_name,
+                            last_name: ch.last_name,
+                            matricule: ch.matricule,
+                            class_name: ch.class_name,
+                          },
+                          ch.financials?.payments || [],
+                          {
+                            total_due: ch.financials?.totalDue || 0,
+                            total_paid: ch.financials?.totalPaid || 0,
+                            balance: ch.financials?.balance ?? 0,
+                          },
+                          establishment
+                        )
+                      }
                       className="text-indigo-200 hover:text-white font-semibold flex items-center space-x-1 cursor-pointer bg-indigo-600 hover:bg-indigo-500 px-2.5 py-1 rounded-lg text-xs"
                       title="Télécharger l'état des versements en PDF"
                     >

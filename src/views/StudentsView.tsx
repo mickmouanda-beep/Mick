@@ -35,7 +35,7 @@ import { PaymentReceiptModal } from '../components/PaymentReceiptModal.tsx';
 import { StudentStatementModal } from '../components/StudentStatementModal.tsx';
 import { CloseButton } from '../components/CloseButton.tsx';
 import { PrintHeader } from '../components/PrintHeader.tsx';
-import { printDocument, downloadPdf } from '../utils/printPdfUtils.ts';
+import { printStudentSheet, downloadStudentSheetPdf, printCertificate, downloadCertificatePdf, printDocument } from '../utils/printPdfUtils.ts';
 import { CustomizableSchoolCertificate } from '../components/documents/CustomizableSchoolCertificate.tsx';
 
 export const StudentsView: React.FC = () => {
@@ -106,6 +106,8 @@ export const StudentsView: React.FC = () => {
 
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const [generatingPdf, setGeneratingPdf] = useState(false);
+  const [pdfError, setPdfError] = useState<string | null>(null);
 
   const isPromoteur = user?.role === 'PROMOTEUR';
   const canEnroll = hasRole(['DIRECTEUR_GENERAL', 'DIRECTEUR_ETUDES', 'GESTIONNAIRE', 'SURVEILLANT']) && !isPromoteur;
@@ -338,6 +340,32 @@ export const StudentsView: React.FC = () => {
       await loadData();
     } catch (err: any) {
       setError(err.message);
+    }
+  };
+
+  const handleDownloadSheet = async () => {
+    if (!selectedStudent) return;
+    setGeneratingPdf(true);
+    setPdfError(null);
+    try {
+      await downloadStudentSheetPdf(selectedStudent.student, establishment);
+    } catch (err: any) {
+      setPdfError(err.message || "Erreur PDF.");
+    } finally {
+      setGeneratingPdf(false);
+    }
+  };
+
+  const handleDownloadCertificate = async () => {
+    if (!selectedStudent) return;
+    setGeneratingPdf(true);
+    setPdfError(null);
+    try {
+      await downloadCertificatePdf(selectedStudent.student, establishment);
+    } catch (err: any) {
+      setPdfError(err.message || "Erreur PDF.");
+    } finally {
+      setGeneratingPdf(false);
     }
   };
 
@@ -1145,6 +1173,18 @@ export const StudentsView: React.FC = () => {
                   </div>
 
                   <div className="flex items-center space-x-2">
+                    {pdfError && (
+                      <div className="flex items-center space-x-2 px-3 py-1.5 bg-rose-950/50 border border-rose-800 rounded-lg text-[10px] text-rose-200">
+                        <AlertCircle className="w-3.5 h-3.5" />
+                        <span>{pdfError}</span>
+                        <button 
+                          onClick={handleDownloadSheet}
+                          className="underline font-bold hover:text-white"
+                        >
+                          Réessayer
+                        </button>
+                      </div>
+                    )}
                     <button
                       type="button"
                       onClick={() => setShowDetailModal(false)}
@@ -1154,25 +1194,27 @@ export const StudentsView: React.FC = () => {
                     </button>
                     <button
                       type="button"
-                      onClick={() =>
-                        downloadPdf(
-                          'printable-student-registration-form',
-                          `Fiche_Inscription_${selectedStudent.student.matricule || 'eleve'}.pdf`
-                        )
-                      }
-                      className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-xl text-xs font-semibold flex items-center space-x-1.5 transition cursor-pointer"
+                      disabled={generatingPdf}
+                      onClick={handleDownloadSheet}
+                      className="px-4 py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 border border-slate-700 rounded-xl text-xs font-semibold flex items-center space-x-1.5 transition cursor-pointer"
                       title="Télécharger la fiche en PDF"
                     >
-                      <Download className="w-4 h-4 text-slate-300" />
-                      <span>Télécharger PDF</span>
+                      {generatingPdf ? (
+                        <>
+                          <div className="w-3.5 h-3.5 border-2 border-slate-400 border-t-transparent rounded-full animate-spin" />
+                          <span>Génération...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Download className="w-4 h-4 text-slate-300" />
+                          <span>Télécharger PDF (Vecteur)</span>
+                        </>
+                      )}
                     </button>
                     <button
                       type="button"
                       onClick={() =>
-                        printDocument(
-                          'printable-student-registration-form',
-                          `Fiche_Inscription_${selectedStudent.student.matricule || 'eleve'}`
-                        )
+                        printStudentSheet(selectedStudent.student, establishment)
                       }
                       className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold flex items-center space-x-2 shadow-lg transition cursor-pointer"
                     >
@@ -1354,26 +1396,40 @@ export const StudentsView: React.FC = () => {
             {detailTab === 'certificat' && selectedStudent && (
               <div className="space-y-4">
                 <div className="flex justify-end space-x-2 no-print pb-2 border-b border-slate-800">
+                  {pdfError && (
+                    <div className="flex items-center space-x-2 px-3 py-1.5 bg-rose-950/50 border border-rose-800 rounded-lg text-[10px] text-rose-200">
+                      <AlertCircle className="w-3.5 h-3.5" />
+                      <span>{pdfError}</span>
+                      <button 
+                        onClick={handleDownloadCertificate}
+                        className="underline font-bold hover:text-white"
+                      >
+                        Réessayer
+                      </button>
+                    </div>
+                  )}
                   <button
                     type="button"
-                    onClick={() =>
-                      downloadPdf(
-                        'printable-school-certificate',
-                        `Certificat_Scolarite_${selectedStudent.student.matricule || 'eleve'}.pdf`
-                      )
-                    }
-                    className="px-3.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-xl text-xs font-semibold flex items-center space-x-1.5 transition cursor-pointer"
+                    disabled={generatingPdf}
+                    onClick={handleDownloadCertificate}
+                    className="px-3.5 py-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 border border-slate-700 rounded-xl text-xs font-semibold flex items-center space-x-1.5 transition cursor-pointer"
                   >
-                    <Download className="w-3.5 h-3.5" />
-                    <span>Télécharger PDF</span>
+                    {generatingPdf ? (
+                      <>
+                        <div className="w-3.5 h-3.5 border-2 border-slate-400 border-t-transparent rounded-full animate-spin" />
+                        <span>Génération...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Download className="w-3.5 h-3.5" />
+                        <span>Télécharger PDF (Vecteur)</span>
+                      </>
+                    )}
                   </button>
                   <button
                     type="button"
                     onClick={() =>
-                      printDocument(
-                        'printable-school-certificate',
-                        `Certificat_Scolarite_${selectedStudent.student.matricule || 'eleve'}`
-                      )
+                      printCertificate(selectedStudent.student, establishment)
                     }
                     className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold flex items-center space-x-1.5 shadow transition cursor-pointer"
                   >

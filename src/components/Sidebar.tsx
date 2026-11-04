@@ -18,6 +18,7 @@ import {
   CalendarDays,
   BookMarked,
   ClipboardCheck,
+  KeyRound,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext.tsx';
 import { UserRole } from '../types.ts';
@@ -40,6 +41,8 @@ export type ActiveTab =
   | 'contracts-salaries'
   | 'decisions'
   | 'admin'
+  | 'student-cards'
+  | 'profile'
   | 'commercial'
   | 'developer';
 
@@ -177,6 +180,20 @@ const NAV_ITEMS: NavItem[] = [
     icon: Sliders,
     allowedRoles: ['PROMOTEUR', 'DIRECTEUR_GENERAL'],
     description: 'Comptes, statuts & traçabilité immuable',
+  },
+  {
+    id: 'student-cards',
+    label: 'Cartes scolaires',
+    icon: Award,
+    allowedRoles: ['PROMOTEUR', 'DIRECTEUR_GENERAL', 'DIRECTEUR_ETUDES', 'GESTIONNAIRE'],
+    description: 'Cartes recto-verso ID-1, QR code & téléchargement PDF',
+  },
+  {
+    id: 'profile',
+    label: 'Mon profil / Mot de passe',
+    icon: KeyRound,
+    allowedRoles: ['PROMOTEUR', 'DIRECTEUR_GENERAL', 'DIRECTEUR_ETUDES', 'GESTIONNAIRE', 'COMPTABLE', 'SURVEILLANT', 'ENSEIGNANT', 'ELEVE', 'PARENT'],
+    description: 'Sécurité, mot de passe et réinitialisation',
   },
 ];
 

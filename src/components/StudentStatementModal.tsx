@@ -14,7 +14,7 @@ import { Payment, Establishment, Student } from '../types.ts';
 import { PrintableReceipt } from './PrintableReceipt.tsx';
 import { numberToFrenchWords } from '../utils/numberToFrenchWords.ts';
 import { CloseButton } from './CloseButton.tsx';
-import { printDocument, downloadPdf } from '../utils/printPdfUtils.ts';
+import { printStudentStatementPdf, downloadStudentStatementPdf } from '../utils/printPdfUtils.ts';
 import { CustomizableStatement } from './documents/CustomizableStatement.tsx';
 
 interface StudentStatementModalProps {
@@ -40,6 +40,8 @@ export const StudentStatementModal: React.FC<StudentStatementModalProps> = ({
   onPrintReceipt,
 }) => {
   const [selectedReceipt, setSelectedReceipt] = useState<Payment | null>(null);
+  const [generatingPdf, setGeneratingPdf] = useState(false);
+  const [pdfError, setPdfError] = useState<string | null>(null);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -77,12 +79,30 @@ export const StudentStatementModal: React.FC<StudentStatementModalProps> = ({
     badgeColor = 'bg-amber-500/15 text-amber-300 border-amber-500/30';
   }
 
-  const handlePrint = () => {
-    printDocument('printable-student-statement', `Releve_${student.matricule || 'eleve'}`);
+  const handlePrint = async () => {
+    await printStudentStatementPdf(
+      student,
+      payments,
+      { total_due: totalDue, total_paid: totalPaid, balance },
+      establishment
+    );
   };
 
-  const handleDownloadPdf = () => {
-    downloadPdf('printable-student-statement', `Releve_Paiements_${student.matricule || 'eleve'}.pdf`);
+  const handleDownloadPdf = async () => {
+    setGeneratingPdf(true);
+    setPdfError(null);
+    try {
+      await downloadStudentStatementPdf(
+        student,
+        payments,
+        { total_due: totalDue, total_paid: totalPaid, balance },
+        establishment
+      );
+    } catch (err: any) {
+      setPdfError(err.message || "Erreur PDF.");
+    } finally {
+      setGeneratingPdf(false);
+    }
   };
 
   return (
@@ -111,12 +131,17 @@ export const StudentStatementModal: React.FC<StudentStatementModalProps> = ({
           <div className="flex items-center space-x-2 no-print">
             <button
               type="button"
+              disabled={generatingPdf}
               onClick={handleDownloadPdf}
-              className="px-3.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-xl text-xs font-semibold flex items-center space-x-1.5 transition cursor-pointer"
+              className="px-3.5 py-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 border border-slate-700 rounded-xl text-xs font-semibold flex items-center space-x-1.5 transition cursor-pointer"
               title="Télécharger en PDF"
             >
-              <Download className="w-3.5 h-3.5" />
-              <span>Télécharger PDF</span>
+              {generatingPdf ? (
+                <div className="w-3.5 h-3.5 border-2 border-slate-400 border-t-transparent rounded-full animate-spin" />
+              ) : (
+                <Download className="w-3.5 h-3.5 text-indigo-400" />
+              )}
+              <span>{generatingPdf ? 'Génération...' : 'Télécharger PDF'}</span>
             </button>
             <button
               type="button"

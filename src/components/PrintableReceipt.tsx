@@ -19,12 +19,18 @@ export const PrintableReceipt: React.FC<PrintableReceiptProps> = ({
   config,
 }) => {
   return (
-    <CustomizableReceipt
-      payment={payment}
-      establishment={establishment}
-      format={format}
-      isDuplicate={isDuplicate}
-      config={config}
-    />
+    <div
+      className="printable-receipt-card bg-white rounded-xl shadow-sm overflow-hidden"
+      data-receipt-card="true"
+      data-receipt-id={payment.id || payment.receipt_number}
+    >
+      <CustomizableReceipt
+        payment={payment}
+        establishment={establishment}
+        format={format}
+        isDuplicate={isDuplicate}
+        config={config}
+      />
+    </div>
   );
 };

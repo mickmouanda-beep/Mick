@@ -15,7 +15,7 @@ import { PrintableReceipt } from './PrintableReceipt.tsx';
 import { api } from '../lib/api.ts';
 import { numberToFrenchWords } from '../utils/numberToFrenchWords.ts';
 import { CloseButton } from './CloseButton.tsx';
-import { printDocument, downloadPdf } from '../utils/printPdfUtils.ts';
+import { printReceiptPdf, downloadReceiptPdf, estimateReceiptPdfSize } from '../utils/printPdfUtils.ts';
 
 interface PaymentReceiptModalProps {
   payments: Payment | Payment[];
@@ -33,6 +33,9 @@ export const PaymentReceiptModal: React.FC<PaymentReceiptModalProps> = ({
   const [format, setFormat] = useState<'A4' | 'A5'>('A4');
   const [copySuccess, setCopySuccess] = useState(false);
   const [loggingPrint, setLoggingPrint] = useState(false);
+  const [isGeneratingPdf, setIsGeneratingPdf] = useState(false);
+  const [pdfError, setPdfError] = useState<string | null>(null);
+  const [estimatedSize, setEstimatedSize] = useState<string>('...');
 
   const paymentList: Payment[] = Array.isArray(payments) ? payments : [payments];
   const isMultiple = paymentList.length > 1;
@@ -45,11 +48,17 @@ export const PaymentReceiptModal: React.FC<PaymentReceiptModalProps> = ({
 
     window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('popstate', handlePopState);
+
+    // Estimer la taille du PDF à l'ouverture
+    if (!isMultiple && paymentList[0]) {
+      estimateReceiptPdfSize().then(setEstimatedSize);
+    }
+
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('popstate', handlePopState);
     };
-  }, [onClose]);
+  }, [onClose, isMultiple, establishment]);
 
   // Enregistrer l'impression / réimpression dans le journal d'audit
   const handlePrint = async () => {
@@ -74,18 +83,23 @@ export const PaymentReceiptModal: React.FC<PaymentReceiptModalProps> = ({
       }
     } finally {
       setLoggingPrint(false);
-      await printDocument(
-        'printable-payment-receipts',
-        isMultiple ? 'Quittances_Groupees' : `Quittance_${paymentList[0]?.receipt_number || 'paiement'}`
-      );
+      for (const p of paymentList) {
+        await printReceiptPdf(p, establishment, format);
+      }
     }
   };
 
   const handleDownloadPdf = async () => {
-    const filename = isMultiple
-      ? `Quittances_${paymentList.length}_recus.pdf`
-      : `Quittance_${paymentList[0]?.receipt_number || 'FSM'}.pdf`;
-    await downloadPdf('printable-payment-receipts', filename);
+    setIsGeneratingPdf(true);
+    setPdfError(null);
+    try {
+      await downloadReceiptPdf(paymentList, establishment, format);
+    } catch (err: any) {
+      console.error("Erreur téléchargement PDF quittance:", err);
+      setPdfError(err?.message || "Erreur lors de la génération du PDF.");
+    } finally {
+      setIsGeneratingPdf(false);
+    }
   };
 
   // Partage WhatsApp du reçu
@@ -202,19 +216,23 @@ _Document officiel certifié généré par Eco GES_`;
             {/* Bouton Télécharger en PDF */}
             <button
               type="button"
-              disabled={loggingPrint}
+              disabled={loggingPrint || isGeneratingPdf}
               onClick={handleDownloadPdf}
-              className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-xl text-xs font-semibold flex items-center space-x-1.5 transition cursor-pointer"
-              title="Télécharger en PDF"
+              className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-xl text-xs font-semibold flex items-center space-x-1.5 transition cursor-pointer disabled:opacity-50"
+              title="Télécharger en PDF vectoriel léger"
             >
               <Download className="w-3.5 h-3.5" />
-              <span>Télécharger PDF</span>
+              <span>
+                {isGeneratingPdf 
+                  ? 'Génération en cours...' 
+                  : (isMultiple ? `Télécharger PDF (${paymentList.length})` : 'Télécharger PDF')}
+              </span>
             </button>
 
             {/* Bouton Imprimer */}
             <button
               type="button"
-              disabled={loggingPrint}
+              disabled={loggingPrint || isGeneratingPdf}
               onClick={handlePrint}
               className="px-4 py-1.5 bg-teal-600 hover:bg-teal-500 disabled:opacity-50 text-white rounded-xl text-xs font-bold flex items-center space-x-1.5 shadow-lg shadow-teal-600/30 transition cursor-pointer"
             >
@@ -226,6 +244,22 @@ _Document officiel certifié généré par Eco GES_`;
             <CloseButton onClose={onClose} className="sticky top-2 z-10" />
           </div>
         </div>
+
+        {/* Message d'erreur PDF avec Retry */}
+        {pdfError && (
+          <div className="mx-4 mt-4 p-3 bg-rose-500/10 border border-rose-500/30 rounded-xl flex items-center justify-between text-rose-300 text-xs animate-shake">
+            <div className="flex items-center space-x-2">
+              <Layers className="w-4 h-4 text-rose-500" />
+              <span>{pdfError}</span>
+            </div>
+            <button 
+              onClick={handleDownloadPdf}
+              className="px-2 py-1 bg-rose-600 text-white rounded-lg font-bold hover:bg-rose-500 transition"
+            >
+              Réessayer
+            </button>
+          </div>
+        )}
 
         {/* CORPS DE L'APERÇU IMPRIMABLE */}
         <div id="printable-payment-receipts" className="overflow-y-auto p-2 sm:p-4 space-y-6 flex-1 bg-slate-950/40 rounded-xl border border-slate-800/60 my-3 printable-document">

@@ -24,6 +24,7 @@ import {
   UserCheck,
   Sparkles,
   AlertTriangle,
+  Download,
 } from 'lucide-react';
 import { api } from '../lib/api.ts';
 import { useAuth } from '../context/AuthContext.tsx';
@@ -32,11 +33,14 @@ import { PrintableReceipt } from '../components/PrintableReceipt.tsx';
 import { PaymentReceiptModal } from '../components/PaymentReceiptModal.tsx';
 import { StudentStatementModal } from '../components/StudentStatementModal.tsx';
 import { OFFICIAL_CYCLES, MONTANT_MIN, MONTANT_MAX } from '../constants.ts';
+import { downloadFinanceListPdf } from '../utils/printPdfUtils.ts';
 
 export const FinanceView: React.FC = () => {
   const { establishment, hasRole, user } = useAuth();
   const canManageFinance = hasRole(['COMPTABLE', 'GESTIONNAIRE', 'DIRECTEUR_GENERAL', 'PROMOTEUR', 'ADMIN_GENERAL']);
-  const [activeTab, setActiveTab] = useState<'payments' | 'balances' | 'expenses' | 'tarifs' | 'injections'>('payments');
+  const [activeTab, setActiveTab] = useState<'payments' | 'balances' | 'expenses' | 'tarifs' | 'injections' | 'reports'>('payments');
+  const [reportDate, setReportDate] = useState(new Date().toISOString().split('T')[0]);
+  const [reportMonth, setReportMonth] = useState(new Date().toISOString().slice(0, 7));
   const [payments, setPayments] = useState<Payment[]>([]);
   const [studentBalances, setStudentBalances] = useState<any[]>([]);
   const [expenses, setExpenses] = useState<Expense[]>([]);
@@ -48,6 +52,10 @@ export const FinanceView: React.FC = () => {
   const [classesList, setClassesList] = useState<any[]>([]);
   const [tariffAudits, setTariffAudits] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+
+  // ... later in the render loop
+
+  const canViewReports = hasRole(['COMPTABLE', 'GESTIONNAIRE', 'DIRECTEUR_GENERAL', 'PROMOTEUR', 'ADMIN_GENERAL']);
 
   // Modal Nouveau Plan Tarifaire Promoteur (Partie II)
   const [showTariffPlanModal, setShowTariffPlanModal] = useState(false);
@@ -127,6 +135,8 @@ export const FinanceView: React.FC = () => {
 
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const [generatingPdf, setGeneratingPdf] = useState(false);
+  const [pdfError, setPdfError] = useState<string | null>(null);
 
   const isPromoteur = user?.role === 'PROMOTEUR';
   const isComptable = user?.role === 'COMPTABLE';
@@ -135,8 +145,8 @@ export const FinanceView: React.FC = () => {
   // 1. Encaisser un versement élève : Réservé au GESTIONNAIRE / Secrétaire, DIRECTEUR_GENERAL, ADMIN_GENERAL (bloqué pour COMPTABLE et PROMOTEUR)
   const canCashIn = hasRole(['GESTIONNAIRE', 'DIRECTEUR_GENERAL', 'ADMIN_GENERAL']) && !isPromoteur && !isComptable;
 
-  // 2. Renforcement de caisse : Réservé au COMPTABLE, GESTIONNAIRE, PROMOTEUR, DIRECTEUR_GENERAL, ADMIN_GENERAL
-  const canInjectCash = hasRole(['GESTIONNAIRE', 'COMPTABLE', 'PROMOTEUR', 'DIRECTEUR_GENERAL', 'ADMIN_GENERAL']);
+  // 2. Renforcement de caisse : Réservé au COMPTABLE, PROMOTEUR, DIRECTEUR_GENERAL, ADMIN_GENERAL (bloqué pour GESTIONNAIRE)
+  const canInjectCash = hasRole(['COMPTABLE', 'PROMOTEUR', 'DIRECTEUR_GENERAL', 'ADMIN_GENERAL']) && !isGestionnaire;
 
   // Sorties de caisse
   const canDisburse = hasRole(['COMPTABLE', 'DIRECTEUR_GENERAL', 'ADMIN_GENERAL']) && !isPromoteur;
@@ -528,6 +538,51 @@ export const FinanceView: React.FC = () => {
     );
   });
 
+  const handleExportBalances = async () => {
+    if (filteredBalances.length === 0) return;
+    setGeneratingPdf(true);
+    setPdfError(null);
+    try {
+      const data = filteredBalances.map(b => [
+        b.matricule,
+        `${b.last_name} ${b.first_name}`,
+        b.class_name || '-',
+        b.totalDue.toLocaleString('fr-FR') + ' FCFA',
+        b.total_paid.toLocaleString('fr-FR') + ' FCFA',
+        b.balance.toLocaleString('fr-FR') + ' FCFA',
+        b.paymentStatus
+      ]);
+      const columns = ['MATRICULE', 'ÉLÈVE', 'CLASSE', 'EXIGIBLE', 'VERSÉ', 'SOLDE', 'STATUT'];
+      await downloadFinanceListPdf("État des Soldes et Impayés Élèves", data, columns, establishment);
+    } catch (err: any) {
+      setPdfError(err.message || "Erreur PDF.");
+    } finally {
+      setGeneratingPdf(false);
+    }
+  };
+
+  const handleExportExpenses = async () => {
+    if (expenses.length === 0) return;
+    setGeneratingPdf(true);
+    setPdfError(null);
+    try {
+      const data = expenses.map(e => [
+        e.expense_number || '-',
+        new Date(e.created_at).toLocaleDateString('fr-FR'),
+        e.category,
+        e.description,
+        e.beneficiary,
+        e.amount.toLocaleString('fr-FR') + ' FCFA'
+      ]);
+      const columns = ['RÉF.', 'DATE', 'CATÉGORIE', 'DESCRIPTION', 'BÉNÉFICIAIRE', 'MONTANT'];
+      await downloadFinanceListPdf("Journal des Dépenses et Décaissements", data, columns, establishment);
+    } catch (err: any) {
+      setPdfError(err.message || "Erreur PDF.");
+    } finally {
+      setGeneratingPdf(false);
+    }
+  };
+
   return (
     <div className="p-4 sm:p-6 lg:p-8 space-y-6 max-w-7xl mx-auto">
       
@@ -561,7 +616,7 @@ export const FinanceView: React.FC = () => {
           </div>
         ) : (canInjectCash || canDisburse || canCashIn) ? (
           <div className="flex flex-wrap items-center gap-2">
-            {canInjectCash && (
+            {canInjectCash && !isGestionnaire && (
               <button
                 onClick={() => setShowInjectionModal(true)}
                 className="px-3.5 py-2 bg-emerald-950/80 hover:bg-emerald-900 text-emerald-200 border border-emerald-700/60 rounded-xl text-xs font-semibold flex items-center space-x-1.5 transition cursor-pointer"
@@ -696,6 +751,20 @@ export const FinanceView: React.FC = () => {
           >
             <TrendingUp className="w-4 h-4 text-emerald-400" />
             <span>Renforcements de Caisse ({cashInjections.length})</span>
+          </button>
+        )}
+
+        {canViewReports && (
+          <button
+            onClick={() => setActiveTab('reports')}
+            className={`px-4 py-2.5 border-b-2 transition flex items-center space-x-2 ${
+              activeTab === 'reports'
+                ? 'border-indigo-500 text-indigo-400 font-bold'
+                : 'border-transparent text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <FileText className="w-4 h-4 text-indigo-400" />
+            <span>Rapports Financiers</span>
           </button>
         )}
 
@@ -892,8 +961,21 @@ export const FinanceView: React.FC = () => {
               />
             </div>
 
-            <div className="text-xs text-slate-400">
-              Total élèves suivis : <span className="font-bold text-white">{filteredBalances.length}</span>
+            <div className="text-xs text-slate-400 flex items-center space-x-3">
+              <span>Total élèves suivis : <span className="font-bold text-white">{filteredBalances.length}</span></span>
+              
+              <button
+                onClick={handleExportBalances}
+                disabled={generatingPdf}
+                className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-300 border border-slate-700 rounded-lg text-[10px] font-bold flex items-center space-x-1.5 transition cursor-pointer"
+              >
+                {generatingPdf ? (
+                  <div className="w-3 h-3 border-2 border-slate-400 border-t-transparent rounded-full animate-spin" />
+                ) : (
+                  <FileText className="w-3 h-3 text-teal-400" />
+                )}
+                <span>{generatingPdf ? 'Génération...' : 'Exporter Liste (PDF)'}</span>
+              </button>
             </div>
           </div>
 
@@ -974,43 +1056,59 @@ export const FinanceView: React.FC = () => {
               </p>
             </div>
           ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs text-slate-300">
-                <thead className="bg-slate-800/60 text-slate-400 uppercase tracking-wider text-[10px] border-b border-slate-800">
-                  <tr>
-                    <th className="p-3.5">N° Bon Dépense</th>
-                    <th className="p-3.5">Date</th>
-                    <th className="p-3.5">Catégorie</th>
-                    <th className="p-3.5">Description des Dépenses</th>
-                    <th className="p-3.5">Bénéficiaire</th>
-                    <th className="p-3.5">Mode</th>
-                    <th className="p-3.5">Montant Décaissé</th>
-                    <th className="p-3.5">Auteur</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-800/60">
-                  {expenses.map((e, idx) => (
-                    <tr key={e.id ? `${e.id}-${idx}` : idx} className="hover:bg-slate-800/40">
-                      <td className="p-3.5 font-mono font-bold text-amber-400">{e.expense_number}</td>
-                      <td className="p-3.5 font-mono text-slate-400 text-[11px]">
-                        {new Date(e.created_at).toLocaleDateString('fr-FR')}
-                      </td>
-                      <td className="p-3.5">
-                        <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-slate-800 text-slate-300">
-                          {e.category}
-                        </span>
-                      </td>
-                      <td className="p-3.5 font-semibold text-white max-w-xs">{e.description}</td>
-                      <td className="p-3.5 text-slate-300">{e.beneficiary}</td>
-                      <td className="p-3.5 text-slate-400 font-mono text-[11px]">{e.payment_method}</td>
-                      <td className="p-3.5 font-mono font-bold text-rose-400 text-sm">
-                        -{e.amount.toLocaleString('fr-FR')} FCFA
-                      </td>
-                      <td className="p-3.5 text-slate-400 text-[11px]">{e.author_name}</td>
+            <div>
+              <div className="bg-slate-900 border-b border-slate-800 p-3 px-4 flex justify-end">
+                <button
+                  onClick={handleExportExpenses}
+                  disabled={generatingPdf}
+                  className="px-3.5 py-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 border border-slate-700 rounded-lg text-xs font-semibold flex items-center space-x-1.5 transition cursor-pointer"
+                >
+                  {generatingPdf ? (
+                    <div className="w-3.5 h-3.5 border-2 border-slate-400 border-t-transparent rounded-full animate-spin" />
+                  ) : (
+                    <Download className="w-3.5 h-3.5 text-teal-400" />
+                  )}
+                  <span>{generatingPdf ? 'Génération...' : 'Exporter Liste (PDF)'}</span>
+                </button>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs text-slate-300">
+                  <thead className="bg-slate-800/60 text-slate-400 uppercase tracking-wider text-[10px] border-b border-slate-800">
+                    <tr>
+                      <th className="p-3.5">N° Bon Dépense</th>
+                      <th className="p-3.5">Date</th>
+                      <th className="p-3.5">Catégorie</th>
+                      <th className="p-3.5">Description des Dépenses</th>
+                      <th className="p-3.5">Bénéficiaire</th>
+                      <th className="p-3.5">Mode</th>
+                      <th className="p-3.5">Montant Décaissé</th>
+                      <th className="p-3.5">Auteur</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/60">
+                    {expenses.map((e, idx) => (
+                      <tr key={e.id ? `${e.id}-${idx}` : idx} className="hover:bg-slate-800/40">
+                        <td className="p-3.5 font-mono font-bold text-amber-400">{e.expense_number}</td>
+                        <td className="p-3.5 font-mono text-slate-400 text-[11px]">
+                          {new Date(e.created_at).toLocaleDateString('fr-FR')}
+                        </td>
+                        <td className="p-3.5">
+                          <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-slate-800 text-slate-300">
+                            {e.category}
+                          </span>
+                        </td>
+                        <td className="p-3.5 font-semibold text-white max-w-xs">{e.description}</td>
+                        <td className="p-3.5 text-slate-300">{e.beneficiary}</td>
+                        <td className="p-3.5 text-slate-400 font-mono text-[11px]">{e.payment_method}</td>
+                        <td className="p-3.5 font-mono font-bold text-rose-400 text-sm">
+                          -{e.amount.toLocaleString('fr-FR')} FCFA
+                        </td>
+                        <td className="p-3.5 text-slate-400 text-[11px]">{e.author_name}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
           )}
         </div>
@@ -1361,6 +1459,70 @@ export const FinanceView: React.FC = () => {
               </table>
             </div>
           )}
+        </div>
+      )}
+
+      {/* TAB 6: RAPPORTS FINANCIERS */}
+      {activeTab === 'reports' && canViewReports && (
+        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-sm space-y-6">
+          <div className="flex items-center justify-between">
+            <h3 className="text-sm font-bold text-white">Rapports Financiers</h3>
+            <div className="space-x-2">
+              <button onClick={() => window.print()} className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-semibold">
+                <Printer className="w-3.5 h-3.5 inline mr-1.5" /> Imprimer
+              </button>
+              <button onClick={() => {}} className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold">
+                <Download className="w-3.5 h-3.5 inline mr-1.5" /> PDF
+              </button>
+            </div>
+          </div>
+          
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+             {/* Rapport Journalier */}
+             <div className="p-4 bg-slate-800 rounded-xl border border-slate-700 space-y-3">
+               <div className="flex justify-between items-center">
+                 <h4 className="font-bold text-xs text-slate-300">Rapport Journalier</h4>
+                 <input 
+                   type="date" 
+                   max={new Date().toISOString().split('T')[0]}
+                   value={reportDate}
+                   onChange={(e) => setReportDate(e.target.value)}
+                   className="bg-slate-900 border border-slate-700 text-slate-300 text-[10px] rounded px-2 py-1"
+                 />
+               </div>
+               <p className="text-[11px] text-slate-500">Encaissements du {new Date(reportDate).toLocaleDateString()}.</p>
+               {payments.filter(p => p.created_at.startsWith(reportDate)).length === 0 ? (
+                 <div className="text-center py-4 text-slate-600 text-xs italic">Aucune opération pour cette période</div>
+               ) : (
+                 <div className="text-emerald-400 font-bold text-sm text-center py-2">
+                   Total: {payments.filter(p => p.created_at.startsWith(reportDate)).reduce((sum, p) => sum + p.amount, 0).toLocaleString()} FCFA
+                 </div>
+               )}
+             </div>
+             
+             {/* Rapport Mensuel */}
+             <div className="p-4 bg-slate-800 rounded-xl border border-slate-700 space-y-3">
+               <div className="flex justify-between items-center">
+                 <h4 className="font-bold text-xs text-slate-300">Rapport Mensuel</h4>
+                 <input 
+                   type="month" 
+                   max={new Date().toISOString().slice(0, 7)}
+                   value={reportMonth}
+                   onChange={(e) => setReportMonth(e.target.value)}
+                   className="bg-slate-900 border border-slate-700 text-slate-300 text-[10px] rounded px-2 py-1"
+                 />
+               </div>
+               <p className="text-[11px] text-slate-500">Synthèse : Encaissements, Dépenses, Salaires du mois.</p>
+               {payments.filter(p => p.created_at.startsWith(reportMonth)).length === 0 && expenses.filter(e => e.created_at.startsWith(reportMonth)).length === 0 ? (
+                 <div className="text-center py-4 text-slate-600 text-xs italic">Aucune opération pour cette période</div>
+               ) : (
+                 <div className="space-y-1 py-2 text-xs">
+                   <div className="flex justify-between"><span>Encaissements :</span> <span className="font-bold text-emerald-400">{payments.filter(p => p.created_at.startsWith(reportMonth)).reduce((sum, p) => sum + p.amount, 0).toLocaleString()} FCFA</span></div>
+                   <div className="flex justify-between"><span>Dépenses :</span> <span className="font-bold text-rose-400">{expenses.filter(e => e.created_at.startsWith(reportMonth)).reduce((sum, e) => sum + e.amount, 0).toLocaleString()} FCFA</span></div>
+                 </div>
+               )}
+             </div>
+          </div>
         </div>
       )}
 

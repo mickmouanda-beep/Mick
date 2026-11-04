@@ -87,6 +87,9 @@ export const api = {
   },
   getMe: () => request<any>('/auth/me'),
   changePassword: (payload: any) => request<any>('/auth/change-password', { method: 'POST', body: JSON.stringify(payload) }),
+  forceChangePassword: (payload: { newPassword: string }) => request<any>('/auth/force-change-password', { method: 'POST', body: JSON.stringify(payload) }),
+  getStudentCardsHistory: () => request<any[]>('/student-cards'),
+  issueStudentCard: (studentId: string) => request<any>('/student-cards/issue', { method: 'POST', body: JSON.stringify({ studentId }) }),
 
   // Multi-Établissements & Plateforme
   registerSchool: (payload: any) => request<any>('/establishments/register', { method: 'POST', body: JSON.stringify(payload) }),

@@ -108,12 +108,12 @@ export const PayrollView: React.FC = () => {
   const isDirection = isDG || isPromoteur;
   const canManagePayroll = isPromoteur || isComptable;
 
-  // Sécurité d'accès onglet : Seul le Promoteur voit l'onglet "Grille Salariale & Contrats"
+  // Sécurité d'accès onglet : Promoteur et Comptable voient l'onglet "Grille Salariale & Contrats"
   useEffect(() => {
-    if (!isPromoteur && activeTab === 'parameters') {
+    if (!isPromoteur && !isComptable && activeTab === 'parameters') {
       setActiveTab('registry');
     }
-  }, [isPromoteur, activeTab]);
+  }, [isPromoteur, isComptable, activeTab]);
 
   const fetchPayroll = async () => {
     setIsLoading(true);
@@ -133,18 +133,24 @@ export const PayrollView: React.FC = () => {
 
   const fetchUsers = async () => {
     try {
-      const users = await api.getTeachers();
-      setUsersList(users);
-    } catch {
-      // ignore
+      const users = await api.getUsers();
+      // Filtrer uniquement le personnel administratif et enseignant
+      const staffRoles = ['PROMOTEUR', 'DIRECTEUR_GENERAL', 'DIRECTEUR_ETUDES', 'COMPTABLE', 'GESTIONNAIRE', 'SURVEILLANT', 'ENSEIGNANT'];
+      const filteredStaff = (users || []).filter(u => staffRoles.includes(u.role));
+      console.log('[PayrollView] Staff Users fetched:', filteredStaff.length);
+      setUsersList(filteredStaff);
+    } catch (err) {
+      console.error('[PayrollView] Error fetching users:', err);
     }
   };
 
   const fetchSalaryParams = async () => {
-    if (!isPromoteur) return;
+    const isAllowed = isPromoteur || isComptable || isDG || hasRole(['DIRECTEUR_ETUDES']);
+    if (!isAllowed) return;
     setIsParamsLoading(true);
     try {
       const data = await api.getStaffSalaryParameters();
+      console.log('[PayrollView] Salary params fetched:', data?.length);
       const sanitized = (data || []).map((p: any, idx: number) => {
         const uniqueId = p.user_id || p.id || `staff-${idx}`;
         const codeNum = String(idx + 1).padStart(3, '0');
@@ -160,7 +166,7 @@ export const PayrollView: React.FC = () => {
       });
       setSalaryParams(sanitized);
     } catch (err: any) {
-      console.error('Erreur chargement paramètres salariaux:', err);
+      console.error('[PayrollView] Error fetching salary params:', err);
     } finally {
       setIsParamsLoading(false);
     }
@@ -246,21 +252,30 @@ export const PayrollView: React.FC = () => {
   useEffect(() => {
     fetchPayroll();
     fetchUsers();
-    if (activeTab === 'parameters' && isPromoteur) {
+    const isAllowed = isPromoteur || isComptable || isDG || hasRole(['DIRECTEUR_ETUDES']);
+    if (isAllowed) {
       fetchSalaryParams();
     }
-  }, [selectedPeriod, filterDepartment, filterStatus, activeTab, isPromoteur]);
+  }, [selectedPeriod, filterDepartment, filterStatus, activeTab, isPromoteur, isComptable, isDG]);
 
   const handleSelectStaff = (userId: string) => {
+    console.log('[PayrollView] Selecting staff:', userId);
+    const param = salaryParams.find((p) => p.user_id === userId);
     const selected = usersList.find((u) => u.id === userId);
-    if (selected) {
+
+    const staffObj = param || selected;
+
+    if (staffObj) {
+      console.log('[PayrollView] Staff found:', staffObj.full_name, 'Salary:', param?.base_salary);
+      const role = staffObj.role || '';
       setFormData((prev) => ({
         ...prev,
-        userId: selected.id,
-        employeeCode: selected.username ? `EMP-${selected.username.toUpperCase()}` : `EMP-${Date.now().toString().slice(-4)}`,
-        fullName: selected.full_name,
-        jobTitle: selected.role === 'ENSEIGNANT' ? 'Enseignant Titulaire' : selected.role,
-        department: selected.role === 'ENSEIGNANT' ? 'ENSEIGNEMENT' : 'ADMINISTRATION',
+        userId: staffObj.user_id || staffObj.id,
+        employeeCode: param?.employee_code || (staffObj.username ? `EMP-${staffObj.username.toUpperCase()}` : `EMP-${Date.now().toString().slice(-4)}`),
+        fullName: staffObj.full_name || '',
+        jobTitle: role === 'ENSEIGNANT' ? 'Enseignant Titulaire' : role,
+        department: role === 'ENSEIGNANT' ? 'ENSEIGNEMENT' : 'ADMINISTRATION',
+        baseSalary: param ? Number(param.base_salary || 0) : 0,
       }));
     }
   };
@@ -443,8 +458,8 @@ export const PayrollView: React.FC = () => {
           <span>1. Bulletins & Fiches de Paie ({records.length})</span>
         </button>
 
-        {/* Permissons : Seul le Promoteur voit l'onglet "Grille Salariale & Contrats" */}
-        {isPromoteur && (
+        {/* Onglet 2 : Grille Salariale & Contrats */}
+        {(isPromoteur || isComptable) && (
           <button
             onClick={() => setActiveTab('parameters')}
             className={`px-4 py-2 rounded-lg text-xs font-semibold flex items-center space-x-2 transition-colors cursor-pointer ${
@@ -454,7 +469,7 @@ export const PayrollView: React.FC = () => {
             }`}
           >
             <Sliders className="w-4 h-4 text-amber-400" />
-            <span>2. Grille Salariale & Contrats (Promoteur)</span>
+            <span>2. Grille Salariale & Contrats</span>
           </button>
         )}
       </div>
@@ -723,14 +738,14 @@ export const PayrollView: React.FC = () => {
         </div>
       )}
 
-      {/* VUE 2 : GRILLE DES SALAIRES & CONTRATS (RÉSERVÉ AU PROMOTEUR) */}
-      {activeTab === 'parameters' && isPromoteur && (
+      {/* VUE 2 : GRILLE DES SALAIRES & CONTRATS */}
+      {activeTab === 'parameters' && (isPromoteur || isComptable) && (
         <div className="space-y-6">
           <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 bg-slate-900 border border-slate-800 p-4 rounded-2xl">
             <div>
               <div className="flex items-center space-x-2 text-amber-400 text-xs font-bold uppercase tracking-wider mb-1">
                 <Sliders className="w-4 h-4" />
-                <span>Espace Exclusif Promoteur • Contrats & Barèmes Salariaux</span>
+                <span>Contrats & Barèmes Salariaux</span>
               </div>
               <h2 className="text-base font-extrabold text-white">
                 Grille Salariale & Contrats du Personnel
@@ -960,7 +975,7 @@ export const PayrollView: React.FC = () => {
       )}
 
       {/* PANNEAU PLEIN ÉCRAN : FICHE "CONTRAT ET RÉMUNÉRATION" ADAPTÉE SELON LE RÔLE */}
-      {selectedParamForEdit && isPromoteur && (
+      {selectedParamForEdit && (isPromoteur || isComptable) && (
         <div className="fixed inset-0 z-50 bg-slate-950 text-white overflow-y-auto p-4 sm:p-6 lg:p-8 space-y-6">
           {/* Bar de navigation en haut */}
           <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 border-b border-slate-800 pb-5 max-w-5xl mx-auto">
@@ -1420,9 +1435,11 @@ export const PayrollView: React.FC = () => {
                   className="w-full bg-slate-900 border border-slate-700 text-sm rounded-xl p-2.5 text-white"
                 >
                   <option value="">Sélectionner dans le personnel...</option>
-                  {usersList.map((u, uIdx) => (
-                    <option key={u.id ? `${u.id}-${uIdx}` : `user-opt-${uIdx}`} value={u.id}>
-                      {u.full_name} ({u.role} - {u.username})
+                  {salaryParams
+                    .filter(p => p.employee_code?.startsWith('EMP-'))
+                    .map((p, pIdx) => (
+                    <option key={p.id || `param-opt-${pIdx}`} value={p.user_id}>
+                      {p.full_name} ({p.role} - {p.employee_code})
                     </option>
                   ))}
                 </select>

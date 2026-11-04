@@ -30,6 +30,7 @@ import {
   Info,
   Sparkles,
   Award,
+  Loader2,
 } from 'lucide-react';
 import { api } from '../lib/api.ts';
 import { useAuth } from '../context/AuthContext.tsx';
@@ -98,6 +99,8 @@ export const ExamDossiersView: React.FC = () => {
   // Print view target state
   const [printCandidate, setPrintCandidate] = useState<ExamCandidate | null>(null);
   const [isPrintListMode, setIsPrintListMode] = useState<boolean>(false);
+  const [downloadingCandId, setDownloadingCandId] = useState<string | null>(null);
+  const [isDownloadingListPdf, setIsDownloadingListPdf] = useState<boolean>(false);
 
   // Reference for printable sections
   const printSingleRef = useRef<HTMLDivElement>(null);
@@ -497,11 +500,18 @@ export const ExamDossiersView: React.FC = () => {
   };
 
   const handleDownloadPdfSingle = async (cand: ExamCandidate) => {
+    setDownloadingCandId(cand.id);
     setPrintCandidate(cand);
     setIsPrintListMode(false);
-    setTimeout(async () => {
-      await downloadPdf('printable-single-dossier', `Fiche_Dossier_${cand.last_name}_${cand.first_name}.pdf`);
-    }, 200);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    try {
+      await downloadPdf('printable-single-dossier', `Fiche_Dossier_${cand.last_name || 'Candidat'}_${cand.first_name || ''}.pdf`);
+    } catch (err: any) {
+      console.error('Erreur téléchargement PDF fiche dossier:', err);
+      alert('Erreur lors du téléchargement de la fiche PDF : ' + (err?.message || err));
+    } finally {
+      setDownloadingCandId(null);
+    }
   };
 
   const handlePrintList = () => {
@@ -514,12 +524,19 @@ export const ExamDossiersView: React.FC = () => {
   };
 
   const handleDownloadPdfList = async () => {
+    setIsDownloadingListPdf(true);
     setIsPrintListMode(true);
     setPrintCandidate(null);
-    setTimeout(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    try {
       const title = `Bordereau_Dossiers_${activeExam}_${activeExam === 'BAC' ? selectedSerie : '3e'}.pdf`;
-      await downloadPdf('printable-list-dossiers', title);
-    }, 200);
+      await downloadPdf('printable-list-dossiers', title, { landscape: true });
+    } catch (err: any) {
+      console.error('Erreur téléchargement PDF bordereau:', err);
+      alert('Erreur lors du téléchargement du bordereau PDF : ' + (err?.message || err));
+    } finally {
+      setIsDownloadingListPdf(false);
+    }
   };
 
   return (
@@ -585,11 +602,16 @@ export const ExamDossiersView: React.FC = () => {
             </button>
             <button
               onClick={handleDownloadPdfList}
+              disabled={isDownloadingListPdf}
               title="Télécharger le bordereau en PDF"
-              className="px-3 py-2 text-xs font-semibold hover:bg-slate-800 text-slate-200 flex items-center gap-1.5 transition"
+              className="px-3 py-2 text-xs font-semibold hover:bg-slate-800 text-slate-200 flex items-center gap-1.5 transition disabled:opacity-50 cursor-pointer"
             >
-              <Download className="w-4 h-4 text-emerald-400" />
-              <span className="hidden sm:inline">PDF</span>
+              {isDownloadingListPdf ? (
+                <Loader2 className="w-4 h-4 text-emerald-400 animate-spin" />
+              ) : (
+                <Download className="w-4 h-4 text-emerald-400" />
+              )}
+              <span className="hidden sm:inline">{isDownloadingListPdf ? 'PDF...' : 'PDF'}</span>
             </button>
           </div>
 
@@ -1029,10 +1051,15 @@ export const ExamDossiersView: React.FC = () => {
                       {/* Single PDF */}
                       <button
                         onClick={() => handleDownloadPdfSingle(cand)}
+                        disabled={downloadingCandId === cand.id}
                         title="Télécharger la fiche en PDF"
-                        className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition"
+                        className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition disabled:opacity-50 cursor-pointer"
                       >
-                        <Download className="w-4 h-4 text-emerald-400" />
+                        {downloadingCandId === cand.id ? (
+                          <Loader2 className="w-4 h-4 text-emerald-400 animate-spin" />
+                        ) : (
+                          <Download className="w-4 h-4 text-emerald-400" />
+                        )}
                       </button>
 
                       {/* Audit History */}
@@ -1647,7 +1674,7 @@ export const ExamDossiersView: React.FC = () => {
       {/* ========================================================= */}
 
       {/* 1. INDIVIDUAL STUDENT DOSSIER SHEET */}
-      <div className="hidden">
+      <div className="fixed -left-[9999px] -top-[9999px] pointer-events-none opacity-100 z-[-9999]" aria-hidden="true">
         <div
           id="printable-single-dossier"
           ref={printSingleRef}
@@ -1779,7 +1806,7 @@ export const ExamDossiersView: React.FC = () => {
       </div>
 
       {/* 2. GLOBAL / SERIES RECAP BORDEREAU */}
-      <div className="hidden">
+      <div className="fixed -left-[9999px] -top-[9999px] pointer-events-none opacity-100 z-[-9999]" aria-hidden="true">
         <div
           id="printable-list-dossiers"
           ref={printListRef}
