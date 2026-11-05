@@ -115,8 +115,10 @@ export const api = {
     request<any>('/developer/establishments', { method: 'POST', body: JSON.stringify(payload) }),
   updateEstablishmentStatus: (id: string, status: string, reason?: string) =>
     request<any>(`/developer/establishments/${id}/status`, { method: 'PUT', body: JSON.stringify({ status, reason }) }),
-  deleteEstablishmentPermanently: (id: string, confirmationCode: string) =>
-    request<any>(`/developer/establishments/${id}`, { method: 'DELETE', body: JSON.stringify({ confirmationCode }) }),
+  archiveEstablishment: (id: string, reason?: string) =>
+    request<any>(`/developer/establishments/${id}/archive`, { method: 'POST', body: JSON.stringify({ reason }) }),
+  deleteEstablishmentPermanently: (id: string, confirmName: string) =>
+    request<any>(`/developer/establishments/${id}`, { method: 'DELETE', body: JSON.stringify({ confirmName, confirmationCode: confirmName }) }),
   getAuthorizations: () => request<any[]>('/developer/authorizations'),
   createAuthorization: (payload: { promoter_name: string; promoter_email?: string; promoter_phone?: string; notes?: string; validityDays?: number }) =>
     request<any>('/developer/authorizations', { method: 'POST', body: JSON.stringify(payload) }),

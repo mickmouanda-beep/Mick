@@ -311,7 +311,7 @@ export const AdministrationView: React.FC = () => {
           <span>Mon Mot de Passe</span>
         </button>
 
-        {(isPromoteur || user?.role === 'ADMIN_GENERAL') && (
+        {user?.role === 'ADMIN_GENERAL' && (
           <button
             onClick={() => setActiveTab('maintenance')}
             className={`px-4 py-2.5 border-b-2 transition flex items-center space-x-2 ${
@@ -618,7 +618,7 @@ export const AdministrationView: React.FC = () => {
       )}
 
       {/* TAB 5: MAINTENANCE DES DONNÉES */}
-      {activeTab === 'maintenance' && (
+      {activeTab === 'maintenance' && user?.role === 'ADMIN_GENERAL' && (
         <DataMaintenanceSection />
       )}
 

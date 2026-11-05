@@ -47,7 +47,7 @@ export interface RegisterSchoolPayload {
   directorPhone?: string;
 }
 
-export type EstablishmentStatus = 'ACTIVE' | 'PENDING_ACTIVATION' | 'SUSPENDED' | 'DELETED';
+export type EstablishmentStatus = 'ACTIVE' | 'PENDING_ACTIVATION' | 'SUSPENDED' | 'ARCHIVED' | 'DELETED';
 
 export interface CreationAuthorization {
   id: string;

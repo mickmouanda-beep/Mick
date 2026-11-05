@@ -34,7 +34,11 @@ import {
   Building,
   RotateCw,
   Menu,
-  Database
+  Database,
+  Archive,
+  Trash2,
+  RotateCcw,
+  AlertOctagon
 } from 'lucide-react';
 import { api } from '../lib/api.ts';
 import { useAuth } from '../context/AuthContext.tsx';
@@ -103,6 +107,18 @@ export const DeveloperView: React.FC = () => {
   const [showSuspendModal, setShowSuspendModal] = useState(false);
   const [targetSuspendEstId, setTargetSuspendEstId] = useState<string | null>(null);
   const [suspendReason, setSuspendReason] = useState('');
+
+  // Modale Archivage Établissement
+  const [showArchiveModal, setShowArchiveModal] = useState(false);
+  const [targetArchiveEst, setTargetArchiveEst] = useState<any | null>(null);
+  const [archiveReason, setArchiveReason] = useState('');
+  const [archiveLoading, setArchiveLoading] = useState(false);
+
+  // Modale Suppression Définitive (Uniquement pour établissements archivés)
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [targetDeleteEst, setTargetDeleteEst] = useState<any | null>(null);
+  const [deleteConfirmName, setDeleteConfirmName] = useState('');
+  const [deleteLoading, setDeleteLoading] = useState(false);
 
   // Modale Création Code
   const [showCreateAuthModal, setShowCreateAuthModal] = useState(false);
@@ -246,6 +262,74 @@ export const DeveloperView: React.FC = () => {
       await loadAllCentralData();
     } catch (err: any) {
       setFeedback({ type: 'error', text: err.message || 'Erreur lors de la suspension.' });
+    }
+  };
+
+  // Actions Archivage Établissements
+  const handleOpenArchiveModal = (est: any) => {
+    setTargetArchiveEst(est);
+    setArchiveReason('');
+    setShowArchiveModal(true);
+  };
+
+  const handleConfirmArchive = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!targetArchiveEst) return;
+    setArchiveLoading(true);
+    try {
+      await api.archiveEstablishment(targetArchiveEst.id, archiveReason);
+      setShowArchiveModal(false);
+      setTargetArchiveEst(null);
+      setArchiveReason('');
+      setFeedback({ type: 'success', text: `L'établissement "${targetArchiveEst.name}" a été archivé avec succès.` });
+      await loadAllCentralData();
+    } catch (err: any) {
+      setFeedback({ type: 'error', text: err.message || "Erreur lors de l'archivage de l'établissement." });
+    } finally {
+      setArchiveLoading(false);
+    }
+  };
+
+  const handleUnarchiveEstablishment = async (est: any) => {
+    try {
+      await api.updateEstablishmentStatus(est.id, 'ACTIVE');
+      setFeedback({ type: 'success', text: `L'établissement "${est.name}" a été restauré et réactivé avec succès.` });
+      await loadAllCentralData();
+    } catch (err: any) {
+      setFeedback({ type: 'error', text: err.message || "Erreur lors de la réactivation de l'établissement." });
+    }
+  };
+
+  // Actions Suppression Définitive (Réservé aux établissements archivés)
+  const handleOpenDeleteModal = (est: any) => {
+    setTargetDeleteEst(est);
+    setDeleteConfirmName('');
+    setShowDeleteModal(true);
+  };
+
+  const handleConfirmPermanentDelete = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!targetDeleteEst) return;
+    if (deleteConfirmName.trim().toLowerCase() !== targetDeleteEst.name.trim().toLowerCase()) {
+      setFeedback({ type: 'error', text: `Veuillez saisir exactement le nom de l'établissement : "${targetDeleteEst.name}".` });
+      return;
+    }
+    setDeleteLoading(true);
+    try {
+      const res = await api.deleteEstablishmentPermanently(targetDeleteEst.id, deleteConfirmName.trim());
+      setShowDeleteModal(false);
+      const deletedName = targetDeleteEst.name;
+      setTargetDeleteEst(null);
+      setDeleteConfirmName('');
+      setFeedback({
+        type: 'success',
+        text: res.message || `L'établissement "${deletedName}" et toutes ses données associées ont été définitivement supprimés de Firestore.`
+      });
+      await loadAllCentralData();
+    } catch (err: any) {
+      setFeedback({ type: 'error', text: err.message || "Erreur lors de la suppression définitive." });
+    } finally {
+      setDeleteLoading(false);
     }
   };
 
@@ -938,6 +1022,7 @@ export const DeveloperView: React.FC = () => {
                     <option value="ALL">Tous les statuts</option>
                     <option value="ACTIVE">Actifs uniquement</option>
                     <option value="SUSPENDED">Suspendus uniquement</option>
+                    <option value="ARCHIVED">Archivés uniquement</option>
                   </select>
 
                   <select
@@ -1033,6 +1118,10 @@ export const DeveloperView: React.FC = () => {
                                 <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-950 border border-emerald-800 text-emerald-300">
                                   Actif
                                 </span>
+                              ) : est.status === 'ARCHIVED' ? (
+                                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-950 border border-amber-800 text-amber-300">
+                                  Archivé
+                                </span>
                               ) : (
                                 <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-950 border border-rose-800 text-rose-300">
                                   Suspendu
@@ -1051,18 +1140,57 @@ export const DeveloperView: React.FC = () => {
                                   <Eye className="w-3.5 h-3.5 text-indigo-400" />
                                 </button>
 
-                                <button
-                                  type="button"
-                                  onClick={() => handleToggleStatus(est.id, est.status)}
-                                  className={`p-1.5 rounded-lg transition ${
-                                    est.status === 'ACTIVE'
-                                      ? 'bg-rose-950/60 hover:bg-rose-900/80 text-rose-300'
-                                      : 'bg-emerald-950/60 hover:bg-emerald-900/80 text-emerald-300'
-                                  }`}
-                                  title={est.status === 'ACTIVE' ? "Suspendre l'établissement" : "Réactiver l'établissement"}
-                                >
-                                  <Power className="w-3.5 h-3.5" />
-                                </button>
+                                {est.status !== 'ARCHIVED' ? (
+                                  <>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleToggleStatus(est.id, est.status)}
+                                      className={`p-1.5 rounded-lg transition ${
+                                        est.status === 'ACTIVE'
+                                          ? 'bg-rose-950/60 hover:bg-rose-900/80 text-rose-300'
+                                          : 'bg-emerald-950/60 hover:bg-emerald-900/80 text-emerald-300'
+                                      }`}
+                                      title={est.status === 'ACTIVE' ? "Suspendre l'établissement" : "Réactiver l'établissement"}
+                                    >
+                                      <Power className="w-3.5 h-3.5" />
+                                    </button>
+
+                                    {/* Bouton Archiver pour chaque établissement non archivé */}
+                                    <button
+                                      type="button"
+                                      onClick={() => handleOpenArchiveModal(est)}
+                                      className="px-2.5 py-1 bg-amber-950/60 hover:bg-amber-900/80 border border-amber-800 text-amber-300 rounded-lg transition flex items-center space-x-1 text-[11px] font-semibold cursor-pointer"
+                                      title="Archiver l'établissement"
+                                    >
+                                      <Archive className="w-3.5 h-3.5" />
+                                      <span>Archiver</span>
+                                    </button>
+                                  </>
+                                ) : (
+                                  <>
+                                    {/* Bouton Restaurer pour établissement archivé */}
+                                    <button
+                                      type="button"
+                                      onClick={() => handleUnarchiveEstablishment(est)}
+                                      className="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg transition flex items-center space-x-1 text-[11px] cursor-pointer"
+                                      title="Désarchiver et réactiver l'établissement"
+                                    >
+                                      <RotateCcw className="w-3.5 h-3.5 text-slate-400" />
+                                      <span>Restaurer</span>
+                                    </button>
+
+                                    {/* Bouton Supprimer définitivement : UNIQUEMENT pour les établissements archivés */}
+                                    <button
+                                      type="button"
+                                      onClick={() => handleOpenDeleteModal(est)}
+                                      className="px-2.5 py-1 bg-rose-600 hover:bg-rose-500 text-white rounded-lg transition flex items-center space-x-1 text-[11px] font-bold shadow-sm shadow-rose-950 cursor-pointer"
+                                      title="Supprimer définitivement l'établissement de Firestore"
+                                    >
+                                      <Trash2 className="w-3.5 h-3.5" />
+                                      <span>Supprimer définitivement</span>
+                                    </button>
+                                  </>
+                                )}
                               </div>
                             </td>
                           </tr>
@@ -1496,9 +1624,204 @@ export const DeveloperView: React.FC = () => {
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 bg-rose-600 hover:bg-rose-500 text-white rounded-xl font-bold transition"
+                  className="px-4 py-2 bg-rose-600 hover:bg-rose-500 text-white rounded-xl font-bold transition cursor-pointer"
                 >
                   Confirmer la Suspension
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Archivage Établissement */}
+      {showArchiveModal && targetArchiveEst && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm">
+          <div className="w-full max-w-md bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl p-5 text-xs space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+              <h3 className="font-bold text-white text-sm flex items-center space-x-2">
+                <Archive className="w-4 h-4 text-amber-400" />
+                <span>Archiver l'Établissement</span>
+              </h3>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowArchiveModal(false);
+                  setTargetArchiveEst(null);
+                }}
+                className="text-slate-400 hover:text-white"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleConfirmArchive} className="space-y-3.5">
+              <div className="p-3 bg-amber-950/40 border border-amber-800/60 rounded-xl space-y-1.5">
+                <div className="font-bold text-amber-300 text-xs flex items-center space-x-1.5">
+                  <AlertTriangle className="w-3.5 h-3.5" />
+                  <span>{targetArchiveEst.name} ({targetArchiveEst.code})</span>
+                </div>
+                <p className="text-[11px] text-slate-300">
+                  L'archivage gèle l'établissement et bloque les connexions de tout le personnel et des élèves tout en préservant l'intégralité des données Firestore.
+                </p>
+                <p className="text-[11px] text-amber-400/90 font-medium">
+                  Note : Seuls les établissements préalablement archivés peuvent être définitivement supprimés de la plateforme.
+                </p>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-semibold text-slate-300 mb-1">
+                  Motif d'archivage (facultatif)
+                </label>
+                <input
+                  type="text"
+                  value={archiveReason}
+                  onChange={(e) => setArchiveReason(e.target.value)}
+                  placeholder="Ex : Fin d'année scolaire, clôture de contrat, demande du promoteur..."
+                  className="w-full px-3 py-2 bg-slate-800 border border-slate-700 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-amber-500 text-xs"
+                />
+              </div>
+
+              <div className="flex justify-end space-x-2 pt-2 border-t border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowArchiveModal(false);
+                    setTargetArchiveEst(null);
+                  }}
+                  className="px-3 py-2 text-slate-400 hover:text-white font-medium cursor-pointer"
+                >
+                  Annuler
+                </button>
+                <button
+                  type="submit"
+                  disabled={archiveLoading}
+                  className="px-4 py-2 bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white rounded-xl font-bold transition flex items-center space-x-2 cursor-pointer"
+                >
+                  {archiveLoading ? (
+                    <>
+                      <RotateCw className="w-3.5 h-3.5 animate-spin" />
+                      <span>Archivage en cours...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Archive className="w-3.5 h-3.5" />
+                      <span>Confirmer l'Archivage</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Suppression Définitive (Réservé strictement aux établissements archivés, avec saisie exacte du nom) */}
+      {showDeleteModal && targetDeleteEst && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-md">
+          <div className="w-full max-w-lg bg-slate-900 border border-rose-900/80 rounded-2xl shadow-2xl p-6 text-xs space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-rose-900/50">
+              <h3 className="font-bold text-white text-base flex items-center space-x-2">
+                <div className="p-1.5 bg-rose-500/20 text-rose-400 rounded-lg border border-rose-500/30">
+                  <AlertOctagon className="w-5 h-5 text-rose-400" />
+                </div>
+                <span>Suppression Définitive de l'Établissement</span>
+              </h3>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowDeleteModal(false);
+                  setTargetDeleteEst(null);
+                  setDeleteConfirmName('');
+                }}
+                className="text-slate-400 hover:text-white"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleConfirmPermanentDelete} className="space-y-4">
+              <div className="p-4 bg-rose-950/40 border border-rose-800/60 rounded-xl space-y-2 text-rose-200">
+                <div className="font-black text-rose-300 text-xs flex items-center space-x-2 tracking-wide uppercase">
+                  <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+                  <span>Attention : Action Destructive & Irréversible</span>
+                </div>
+                <p className="text-[11px] text-slate-200 leading-relaxed">
+                  Cette opération s'exécute <strong>exclusivement côté serveur</strong> et va supprimer de façon irrévocable dans Cloud Firestore :
+                </p>
+                <ul className="list-disc pl-4 space-y-1 text-[11px] text-slate-300">
+                  <li>L'arborescence complète <code className="text-amber-300 font-mono">establishments/{targetDeleteEst.id}</code> et <strong>toutes ses sous-collections</strong> (élèves, classes, notes, quittances, finances, emplois du temps).</li>
+                  <li><strong>Tous les comptes utilisateurs</strong> rattachés à cet établissement dans la collection <code className="text-amber-300 font-mono">users</code>.</li>
+                  <li>La licence d'exploitation et toutes les configurations liées.</li>
+                </ul>
+                <p className="text-[10px] text-rose-300/80 pt-1 font-mono">
+                  L'action est automatiquement enregistrée et horodatée dans le journal d'audit centralisé.
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <label className="block text-[11px] font-semibold text-slate-300">
+                  Nom exact de l'établissement à détruire :
+                </label>
+                <div className="p-2.5 bg-slate-950 border border-slate-800 rounded-xl font-bold font-mono text-center text-amber-300 text-xs tracking-wide select-all">
+                  {targetDeleteEst.name}
+                </div>
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="block text-[11px] font-semibold text-slate-300">
+                  Pour confirmer, retapez exactement le nom de l'établissement ci-dessus :
+                </label>
+                <input
+                  type="text"
+                  value={deleteConfirmName}
+                  onChange={(e) => setDeleteConfirmName(e.target.value)}
+                  placeholder="Tapez le nom exact de l'établissement..."
+                  autoFocus
+                  className="w-full px-3.5 py-2.5 bg-slate-950 border border-slate-700 focus:border-rose-500 focus:ring-1 focus:ring-rose-500 rounded-xl text-white font-medium text-xs placeholder-slate-600 transition"
+                />
+                <div className="pt-1">
+                  {deleteConfirmName.trim().toLowerCase() === targetDeleteEst.name.trim().toLowerCase() ? (
+                    <div className="flex items-center space-x-1.5 text-emerald-400 font-semibold text-[11px]">
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                      <span>Nom validé. Le bouton de suppression définitive est déverrouillé.</span>
+                    </div>
+                  ) : (
+                    <div className="text-slate-400 text-[11px]">
+                      Le bouton restera désactivé tant que la saisie ne correspond pas mot pour mot.
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="flex justify-end space-x-2 pt-3 border-t border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowDeleteModal(false);
+                    setTargetDeleteEst(null);
+                    setDeleteConfirmName('');
+                  }}
+                  className="px-3.5 py-2 text-slate-400 hover:text-white font-medium cursor-pointer"
+                >
+                  Annuler
+                </button>
+                <button
+                  type="submit"
+                  disabled={deleteConfirmName.trim().toLowerCase() !== targetDeleteEst.name.trim().toLowerCase() || deleteLoading}
+                  className="px-4 py-2.5 bg-rose-600 hover:bg-rose-500 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-xl font-bold transition flex items-center space-x-2 shadow-lg shadow-rose-950 cursor-pointer"
+                >
+                  {deleteLoading ? (
+                    <>
+                      <RotateCw className="w-4 h-4 animate-spin" />
+                      <span>Suppression serveur Firestore en cours...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Trash2 className="w-4 h-4" />
+                      <span>Supprimer Définitivement</span>
+                    </>
+                  )}
                 </button>
               </div>
             </form>
@@ -1746,8 +2069,18 @@ export const DeveloperView: React.FC = () => {
               </div>
               <div>
                 <span className="text-slate-400 block">Statut Établissement :</span>
-                <span className={`font-bold ${selectedEst.status === 'ACTIVE' ? 'text-emerald-400' : 'text-rose-400'}`}>
-                  {selectedEst.status}
+                <span className={`font-bold ${
+                  selectedEst.status === 'ACTIVE'
+                    ? 'text-emerald-400'
+                    : selectedEst.status === 'ARCHIVED'
+                    ? 'text-amber-400'
+                    : 'text-rose-400'
+                }`}>
+                  {selectedEst.status === 'ACTIVE'
+                    ? 'Actif'
+                    : selectedEst.status === 'ARCHIVED'
+                    ? 'Archivé'
+                    : 'Suspendu'}
                 </span>
               </div>
               <div>

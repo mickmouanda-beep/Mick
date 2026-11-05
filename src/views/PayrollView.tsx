@@ -27,7 +27,7 @@ import { PayrollRecord, StaffSalaryParameter } from '../types.ts';
 import { PrintablePayslip } from '../components/PrintablePayslip.tsx';
 
 export const PayrollView: React.FC = () => {
-  const { user, establishment } = useAuth();
+  const { user, establishment, hasRole } = useAuth();
   const [activeTab, setActiveTab] = useState<'registry' | 'parameters'>('registry');
   const [records, setRecords] = useState<PayrollRecord[]>([]);
   const [usersList, setUsersList] = useState<any[]>([]);
@@ -1431,14 +1431,22 @@ export const PayrollView: React.FC = () => {
                   Sélectionner un employé existant (facultatif)
                 </label>
                 <select
+                  value={formData.userId}
                   onChange={(e) => handleSelectStaff(e.target.value)}
                   className="w-full bg-slate-900 border border-slate-700 text-sm rounded-xl p-2.5 text-white"
                 >
                   <option value="">Sélectionner dans le personnel...</option>
-                  {salaryParams
-                    .filter(p => p.employee_code?.startsWith('EMP-'))
-                    .map((p, pIdx) => (
-                    <option key={p.id || `param-opt-${pIdx}`} value={p.user_id}>
+                  {(salaryParams && salaryParams.length > 0
+                    ? salaryParams.filter(p => p.employee_code?.startsWith('EMP-'))
+                    : usersList.filter(u => ['PROMOTEUR', 'DIRECTEUR_GENERAL', 'DIRECTEUR_ETUDES', 'COMPTABLE', 'GESTIONNAIRE', 'SURVEILLANT', 'ENSEIGNANT'].includes(u.role)).map((u, idx) => ({
+                        user_id: u.id,
+                        full_name: u.full_name,
+                        role: u.role,
+                        employee_code: u.employee_code?.startsWith('EMP-') ? u.employee_code : `EMP-${String(idx + 1).padStart(3, '0')}`,
+                        id: u.id
+                      }))
+                  ).map((p, pIdx) => (
+                    <option key={p.user_id || p.id || `param-opt-${pIdx}`} value={p.user_id}>
                       {p.full_name} ({p.role} - {p.employee_code})
                     </option>
                   ))}

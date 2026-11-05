@@ -132,7 +132,7 @@ api.use((req: any, res: any, next: any) => {
 // 0. DIAGNOSTIC FIRESTORE
 // ==========================================
 
-api.get('/firestore/ping', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
+api.get('/firestore/ping', authenticateToken, requireRole(['ADMIN_GENERAL']), async (req: AuthenticatedRequest, res: Response) => {
   const gcpProjectId = firebaseProjectId;
 
   try {
@@ -1248,18 +1248,18 @@ api.post('/developer/establishments', authenticateToken, requireRole(['ADMIN_GEN
   }
 });
 
-// Activer, Suspendre ou Désactiver un établissement
+// Activer, Suspendre, Archiver ou Désactiver un établissement
 api.put('/developer/establishments/:id/status', authenticateToken, requireRole(['ADMIN_GENERAL']), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { status, reason } = req.body;
-    if (!status || !['ACTIVE', 'SUSPENDED', 'DELETED'].includes(status)) {
-      return res.status(400).json({ error: 'Statut demandé invalide (doit être ACTIVE, SUSPENDED ou DELETED).' });
+    if (!status || !['ACTIVE', 'SUSPENDED', 'ARCHIVED', 'DELETED'].includes(status)) {
+      return res.status(400).json({ error: 'Statut demandé invalide (doit être ACTIVE, SUSPENDED, ARCHIVED ou DELETED).' });
     }
     const updated = await changeEstablishmentStatus(
       req.params.id,
       status,
       reason,
-      req.user!.full_name || 'Développeur Eco GES'
+      req.user!.full_name || 'Gestionnaire d\'application'
     );
     res.json({
       message: `Statut de l'établissement mis à jour vers "${status}".`,
@@ -1270,15 +1270,60 @@ api.put('/developer/establishments/:id/status', authenticateToken, requireRole([
   }
 });
 
-// Suppression définitive sécurisée (avec code de confirmation de sécurité)
+// Archiver un établissement (Gestionnaire d'application)
+api.post('/developer/establishments/:id/archive', authenticateToken, requireRole(['ADMIN_GENERAL']), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { reason } = req.body || {};
+    const updated = await changeEstablishmentStatus(
+      req.params.id,
+      'ARCHIVED',
+      reason || 'Établissement archivé par le gestionnaire d\'application',
+      req.user!.full_name || 'Gestionnaire d\'application'
+    );
+    res.json({
+      success: true,
+      message: `L'établissement "${updated.name}" a été archivé avec succès.`,
+      establishment: updated,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message || "Erreur lors de l'archivage de l'établissement." });
+  }
+});
+
+// Suppression définitive sécurisée (exclusivement via serveur, établissement archivé requis, validation par saisie du nom exact)
 api.delete('/developer/establishments/:id', authenticateToken, requireRole(['ADMIN_GENERAL']), async (req: AuthenticatedRequest, res: Response) => {
   try {
-    const { confirmationCode } = req.body;
-    if (confirmationCode !== 'SUPPRIMER-DEFINITIVEMENT') {
-      return res.status(400).json({ error: 'Code de confirmation de sécurité incorrect. Veuillez saisir explicitement "SUPPRIMER-DEFINITIVEMENT".' });
+    const { confirmName, confirmationCode } = req.body || {};
+    const est = await getEstablishment(req.params.id);
+    if (!est) {
+      return res.status(404).json({ error: 'Établissement introuvable.' });
     }
-    await deleteEstablishmentPermanently(req.params.id, req.user!.full_name || 'Développeur Eco GES');
-    res.json({ message: "L'établissement et toutes ses données associées ont été supprimés définitivement de la plateforme." });
+
+    if (est.status !== 'ARCHIVED') {
+      return res.status(400).json({
+        error: "Impossible de supprimer : seuls les établissements préalablement archivés peuvent faire l'objet d'une suppression définitive."
+      });
+    }
+
+    const providedName = (confirmName || confirmationCode || '').trim();
+    if (!providedName || providedName.toLowerCase() !== est.name.trim().toLowerCase()) {
+      return res.status(400).json({
+        error: `Nom d'établissement incorrect. Pour confirmer la suppression définitive, vous devez saisir exactement : "${est.name}".`
+      });
+    }
+
+    const result = await deleteEstablishmentPermanently(
+      req.params.id,
+      req.user!.full_name || 'Gestionnaire d\'application',
+      req.user!.id,
+      providedName
+    );
+
+    res.json({
+      success: true,
+      message: `L'établissement "${result.establishmentName}" ainsi que l'ensemble de ses sous-collections Firestore et ses ${result.deletedUsersCount} compte(s) associé(s) ont été définitivement supprimés.`,
+      deletedUsersCount: result.deletedUsersCount,
+    });
   } catch (error: any) {
     res.status(500).json({ error: error.message || 'Erreur lors de la suppression définitive.' });
   }
@@ -3580,7 +3625,7 @@ api.post('/students/migrate-matricules', authenticateToken, requireRole(['PROMOT
   }
 });
 
-api.post('/migration/run-matricules', authenticateToken, requireRole(['ADMIN_GENERAL', 'PROMOTEUR']), async (req: AuthenticatedRequest, res: Response) => {
+api.post('/migration/run-matricules', authenticateToken, requireRole(['ADMIN_GENERAL']), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { dryRun } = req.body;
     const report = await runStudentMatriculeMigration(!!dryRun);
@@ -6862,7 +6907,7 @@ api.get('/dashboard/stats', authenticateToken, async (req: AuthenticatedRequest,
 
 // --- PARAMÈTRES DE RÉMUNÉRATION (RÉSERVÉ AU PROMOTEUR) ---
 
-api.get('/staff-salary-parameters', authenticateToken, requireRole(['PROMOTEUR', 'COMPTABLE']), async (req: AuthenticatedRequest, res: Response) => {
+api.get('/staff-salary-parameters', authenticateToken, requireRole(['PROMOTEUR', 'COMPTABLE', 'DIRECTEUR_GENERAL', 'DIRECTEUR_ETUDES']), async (req: AuthenticatedRequest, res: Response) => {
   try {
     const estId = req.user!.establishment_id;
     const [users, params] = await Promise.all([

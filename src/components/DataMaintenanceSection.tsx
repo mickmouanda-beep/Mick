@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import { api } from '../lib/api.ts';
 import { formatBrazzavilleDateTime } from '../lib/dateUtils.ts';
+import { useAuth } from '../context/AuthContext.tsx';
 
 interface TableMappingItem {
   tableName: string;
@@ -69,6 +70,11 @@ interface MigrationReport {
 }
 
 export const DataMaintenanceSection: React.FC = () => {
+  const { user } = useAuth();
+  if (user?.role !== 'ADMIN_GENERAL') {
+    return null;
+  }
+
   // État Exportation SQLite
   const [exportLoading, setExportLoading] = useState(false);
   const [exportError, setExportError] = useState<string | null>(null);

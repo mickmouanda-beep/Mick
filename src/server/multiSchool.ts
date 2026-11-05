@@ -11,6 +11,8 @@ import {
   getDocData,
   setDocData,
   deleteDocData,
+  db,
+  logFirestoreAudit,
 } from './firestore_db.ts';
 
 export interface CreateSchoolInput {
@@ -846,13 +848,13 @@ export async function updateEstablishmentLicenseFormula(
 }
 
 /**
- * Met à jour le statut d'un établissement (ACTIVE, SUSPENDED, DELETED) dans Firestore
+ * Met à jour le statut d'un établissement (ACTIVE, SUSPENDED, ARCHIVED, DELETED) dans Firestore
  */
 export async function changeEstablishmentStatus(
   establishmentId: string,
-  newStatus: 'ACTIVE' | 'SUSPENDED' | 'DELETED',
+  newStatus: 'ACTIVE' | 'SUSPENDED' | 'ARCHIVED' | 'DELETED',
   reason?: string,
-  operatorName = 'Développeur Eco GES'
+  operatorName = 'Gestionnaire d\'application'
 ): Promise<any> {
   if (establishmentId === 'EST-ECO-HQ') {
     throw new Error('Impossible de modifier le statut de la plateforme centrale.');
@@ -868,11 +870,18 @@ export async function changeEstablishmentStatus(
     updated.suspended_at = new Date().toISOString();
     updated.suspension_reason = reason || 'Suspension administrative par la direction centrale';
     updated.suspended_by = operatorName;
+  } else if (newStatus === 'ARCHIVED') {
+    updated.archived_at = new Date().toISOString();
+    updated.archive_reason = reason || 'Établissement archivé par le gestionnaire d\'application';
+    updated.archived_by = operatorName;
   } else if (newStatus === 'ACTIVE') {
     updated.activated_at = new Date().toISOString();
     updated.suspended_at = null;
     updated.suspension_reason = null;
     updated.suspended_by = null;
+    updated.archived_at = null;
+    updated.archive_reason = null;
+    updated.archived_by = null;
   } else if (newStatus === 'DELETED') {
     updated.deleted_at = new Date().toISOString();
     updated.deletion_reason = reason || 'Désactivation / suppression logique';
@@ -884,22 +893,43 @@ export async function changeEstablishmentStatus(
     establishmentId,
     'DEV-PLATFORM',
     operatorName,
-    `CHANGEMENT_STATUT_${newStatus}`,
+    newStatus === 'ARCHIVED' ? 'ARCHIVAGE_ETABLISSEMENT' : `CHANGEMENT_STATUT_${newStatus}`,
     'ESTABLISHMENT',
     establishmentId,
     { ancienStatut: est.status || 'ACTIVE', nouveauStatut: newStatus, motif: reason }
   );
 
+  const logId = `AUDIT-STATUS-${Date.now()}-${Math.random().toString(36).substring(2, 7).toUpperCase()}`;
+  await logFirestoreAudit(logId, {
+    id: logId,
+    establishment_id: establishmentId,
+    user_name: operatorName,
+    action: newStatus === 'ARCHIVED' ? 'ARCHIVAGE_ETABLISSEMENT' : `CHANGEMENT_STATUT_${newStatus}`,
+    entity_type: 'ESTABLISHMENT',
+    entity_id: establishmentId,
+    details: {
+      establishmentName: est.name,
+      previousStatus: est.status || 'ACTIVE',
+      newStatus,
+      motif: reason,
+    },
+    created_at: new Date().toISOString(),
+  });
+
   return updated;
 }
 
 /**
- * Suppression définitive d'un établissement dans Firestore
+ * Suppression définitive d'un établissement dans Firestore.
+ * Supprime récursivement tout ce qui est sous establishments/{estId} dans Firestore (toutes les sous-collections)
+ * ainsi que les comptes liés à cet établissement, via le serveur uniquement, et enregistre l'action dans un journal.
  */
 export async function deleteEstablishmentPermanently(
   establishmentId: string,
-  operatorName = 'Développeur Eco GES'
-): Promise<void> {
+  operatorName = 'Gestionnaire d\'application',
+  operatorUserId = 'DEV-PLATFORM',
+  confirmName?: string
+): Promise<{ success: boolean; deletedUsersCount: number; establishmentName: string }> {
   if (establishmentId === 'EST-ECO-HQ') {
     throw new Error('Impossible de supprimer la plateforme centrale.');
   }
@@ -909,18 +939,98 @@ export async function deleteEstablishmentPermanently(
     throw new Error('Établissement introuvable.');
   }
 
+  if (est.status !== 'ARCHIVED') {
+    throw new Error('Seuls les établissements préalablement archivés peuvent être définitivement supprimés.');
+  }
+
+  if (confirmName !== undefined) {
+    const cleanConfirm = confirmName.trim().toLowerCase();
+    const cleanTarget = est.name.trim().toLowerCase();
+    if (cleanConfirm !== cleanTarget) {
+      throw new Error(`Pour confirmer la suppression, vous devez saisir exactement le nom de l'établissement : "${est.name}".`);
+    }
+  }
+
+  // 1. Suppression de tous les comptes utilisateurs liés dans la collection racine 'users'
+  let deletedUsersCount = 0;
+  if (db) {
+    try {
+      const rootUsersSnap = await db.collection('users').where('establishment_id', '==', establishmentId).get();
+      deletedUsersCount = rootUsersSnap.docs.length;
+      if (!rootUsersSnap.empty) {
+        const batchSize = 400;
+        for (let i = 0; i < rootUsersSnap.docs.length; i += batchSize) {
+          const chunk = rootUsersSnap.docs.slice(i, i + batchSize);
+          const batch = db.batch();
+          chunk.forEach((doc: any) => batch.delete(doc.ref));
+          await batch.commit();
+        }
+      }
+    } catch (err: any) {
+      console.warn(`[DeleteEst] Avertissement suppression users racine:`, err?.message);
+    }
+
+    // 2. Suppression récursive intégrale de tout ce qui est sous establishments/{estId} (doc + toutes les sous-collections)
+    try {
+      const estDocRef = db.collection('establishments').doc(establishmentId);
+      if (typeof db.recursiveDelete === 'function') {
+        await db.recursiveDelete(estDocRef);
+      } else {
+        await deleteDocData('establishments', establishmentId);
+      }
+    } catch (err: any) {
+      console.error(`[DeleteEst] Erreur recursiveDelete establishments/${establishmentId}:`, err?.message);
+      await deleteDocData('establishments', establishmentId);
+    }
+  } else {
+    await deleteDocData('establishments', establishmentId);
+  }
+
+  // 3. Suppression des licences & souscriptions rattachées
+  await deleteDocData('subscriptions', establishmentId);
+
+  // 4. Enregistrement strict dans le journal d'audit centralisé
   logAudit(
     'EST-ECO-HQ',
-    'DEV-PLATFORM',
+    operatorUserId,
     operatorName,
     'SUPPRESSION_DEFINITIVE_ETABLISSEMENT',
     'ESTABLISHMENT',
     establishmentId,
-    { name: est.name, code: est.code }
+    {
+      name: est.name,
+      code: est.code,
+      city: est.city,
+      deletedUsersCount,
+      deletedAt: new Date().toISOString(),
+      operatorName,
+    }
   );
 
-  await deleteDocData('establishments', establishmentId);
-  await deleteDocData('subscriptions', establishmentId);
+  const logId = `AUDIT-DEL-${Date.now()}-${Math.random().toString(36).substring(2, 7).toUpperCase()}`;
+  await logFirestoreAudit(logId, {
+    id: logId,
+    establishment_id: 'EST-ECO-HQ',
+    user_id: operatorUserId,
+    user_name: operatorName,
+    action: 'SUPPRESSION_DEFINITIVE_ETABLISSEMENT',
+    entity_type: 'ESTABLISHMENT',
+    entity_id: establishmentId,
+    details: {
+      name: est.name,
+      code: est.code,
+      city: est.city,
+      deletedUsersCount,
+      deletedAt: new Date().toISOString(),
+    },
+    created_at: new Date().toISOString(),
+  });
+
+  return {
+    success: true,
+    deletedUsersCount,
+    establishmentName: est.name,
+  };
 }
 
 /**
